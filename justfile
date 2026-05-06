@@ -68,7 +68,19 @@ minikube-deploy profile="nervix-operator-test" tag=image_tag:
     kubectl --context "{{ profile }}" -n nervix-system rollout status deployment/nervix-k8s-operator --timeout=180s
 
 minikube-create-cluster profile="nervix-operator-test":
+    #!/usr/bin/env bash
+    set -euo pipefail
     kubectl --context "{{ profile }}" apply -f examples/nervix-cluster.yaml
+    deadline=$((SECONDS + 120))
+    until kubectl --context "{{ profile }}" -n nervix get statefulset/nervix >/dev/null 2>&1; do
+        if (( SECONDS >= deadline )); then
+            echo "statefulset/nervix was not created by the operator within 120s" >&2
+            kubectl --context "{{ profile }}" -n nervix get all >&2 || true
+            kubectl --context "{{ profile }}" -n nervix-system logs deployment/nervix-k8s-operator --tail=200 >&2 || true
+            exit 1
+        fi
+        sleep 2
+    done
     kubectl --context "{{ profile }}" -n nervix rollout status statefulset/nervix --timeout=300s
     kubectl --context "{{ profile }}" -n nervix get nervixcluster nervix -o wide
 
