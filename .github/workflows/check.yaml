@@ -1,0 +1,39 @@
+name: Check
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@1.95
+        with:
+          components: clippy,rustfmt
+
+      - name: Install cargo tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit,just
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Validate
+        run: just validate-ci

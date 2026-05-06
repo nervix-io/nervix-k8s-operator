@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nervix
+---
+apiVersion: nervix.io/v1alpha1
+kind: NervixCluster
+metadata:
+  name: nervix
+  namespace: nervix
+spec:
+  image: ghcr.io/nervix-io/nervix:20260505051615-debian
+  replicas: 3
+  clusterId: nervix-kube
+  storage: 5Gi
+  logFilter: info,nervix=info
+  localAccess:
+    enabled: true
+    bootstrapGrpcNodePort: 31390
+    bootstrapObservabilityNodePort: 31090
+    firstNodeGrpcNodePort: 31391
+    firstNodeObservabilityNodePort: 31091
+  resources:
+    cpuRequest: 250m
+    memoryRequest: 512Mi
+    memoryLimit: 2Gi
