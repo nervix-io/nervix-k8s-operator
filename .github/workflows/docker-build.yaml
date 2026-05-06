@@ -31,7 +31,7 @@ jobs:
   build:
     name: build-${{ matrix.arch }}
     needs: meta
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -111,7 +111,7 @@ jobs:
   minikube:
     name: minikube
     needs: [meta, build]
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
     steps:
       - name: Checkout
@@ -124,6 +124,11 @@ jobs:
 
       - name: Install kubectl
         uses: azure/setup-kubectl@v4
+        with:
+          version: v1.34.0
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
 
       - name: Install minikube
         run: |
@@ -140,7 +145,7 @@ jobs:
 
       - name: Install nervix-cli
         run: |
-          image="ghcr.io/nervix-io/nervix:20260505051615-debian"
+          image="ghcr.io/nervix-io/nervix:20260506054031-debian"
           docker pull "${image}"
           container="$(docker create "${image}")"
           trap 'docker rm -f "${container}" >/dev/null 2>&1 || true' EXIT

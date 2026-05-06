@@ -1,0 +1,16 @@
+apiVersion: v2
+name: nervix-k8s-operator
+description: Kubernetes operator for managing Nervix clusters
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/nervix-io/nervix-k8s-operator
+sources:
+  - https://github.com/nervix-io/nervix-k8s-operator
+keywords:
+  - nervix
+  - operator
+  - kubernetes
+maintainers:
+  - name: Nervix
+    url: https://github.com/nervix-io

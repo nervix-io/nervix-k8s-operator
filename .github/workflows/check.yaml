@@ -16,7 +16,7 @@ concurrency:
 jobs:
   checks:
     name: checks
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -26,6 +26,9 @@ jobs:
         uses: dtolnay/rust-toolchain@1.95
         with:
           components: clippy,rustfmt
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
 
       - name: Install cargo tools
         uses: taiki-e/install-action@v2

@@ -18,9 +18,15 @@ audit:
 test:
     cargo test --all-features --all-targets
 
-validate: fmt lint audit test
+validate: fmt lint audit test helm-lint helm-template
 
-validate-ci: fmt-check lint audit test
+validate-ci: fmt-check lint audit test helm-lint helm-template
+
+helm-lint:
+    helm lint charts/nervix-k8s-operator
+
+helm-template:
+    helm template nervix-k8s-operator charts/nervix-k8s-operator --namespace nervix-system
 
 docker-build tag=image_tag platform="linux/amd64" push="false" cache_from="" cache_to="":
     #!/usr/bin/env bash
@@ -62,13 +68,29 @@ minikube-load-operator profile="nervix-operator-test" tag=image_tag:
 minikube-deploy profile="nervix-operator-test" tag=image_tag:
     #!/usr/bin/env bash
     set -euo pipefail
-    kubectl --context "{{ profile }}" apply -f deploy/crd.yaml
-    kubectl --context "{{ profile }}" apply -f deploy/operator.yaml
-    kubectl --context "{{ profile }}" -n nervix-system set image deployment/nervix-k8s-operator operator="{{ tag }}"
+    image="{{ tag }}"
+    repository="${image%:*}"
+    tag="${image##*:}"
+    helm --kube-context "{{ profile }}" upgrade --install nervix-k8s-operator charts/nervix-k8s-operator \
+        --namespace nervix-system \
+        --create-namespace \
+        --set image.repository="${repository}" \
+        --set image.tag="${tag}"
     kubectl --context "{{ profile }}" -n nervix-system rollout status deployment/nervix-k8s-operator --timeout=180s
 
 minikube-create-cluster profile="nervix-operator-test":
+    #!/usr/bin/env bash
+    set -euo pipefail
     kubectl --context "{{ profile }}" apply -f examples/nervix-cluster.yaml
+    deadline=$((SECONDS + 120))
+    until kubectl --context "{{ profile }}" -n nervix get statefulset/nervix >/dev/null 2>&1; do
+        if (( SECONDS >= deadline )); then
+            echo "operator did not create statefulset/nervix before timeout" >&2
+            kubectl --context "{{ profile }}" -n nervix-system logs deployment/nervix-k8s-operator --tail=200 || true
+            exit 1
+        fi
+        sleep 2
+    done
     kubectl --context "{{ profile }}" -n nervix rollout status statefulset/nervix --timeout=300s
     kubectl --context "{{ profile }}" -n nervix get nervixcluster nervix -o wide
 

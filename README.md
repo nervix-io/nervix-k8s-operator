@@ -31,6 +31,14 @@ kubectl apply -f deploy/operator.yaml
 kubectl apply -f examples/nervix-cluster.yaml
 ```
 
+Or install the operator with Helm:
+
+```sh
+helm upgrade --install nervix-k8s-operator ./charts/nervix-k8s-operator \
+  --namespace nervix-system \
+  --create-namespace
+```
+
 The image in `deploy/operator.yaml` is a placeholder until the operator is
 published. For local clusters, replace it with an image you build and load into
 the cluster.
@@ -44,7 +52,7 @@ metadata:
   name: nervix
   namespace: nervix
 spec:
-  image: ghcr.io/nervix-io/nervix:20260505051615-debian
+  image: ghcr.io/nervix-io/nervix:20260506054031-debian
   replicas: 3
   clusterId: nervix-kube
   localAccess:
