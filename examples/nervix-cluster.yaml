@@ -9,7 +9,7 @@ metadata:
   name: nervix
   namespace: nervix
 spec:
-  image: ghcr.io/nervix-io/nervix:20260505051615-debian
+  image: ghcr.io/nervix-io/nervix:20260506054031-debian
   replicas: 3
   clusterId: nervix-kube
   storage: 5Gi
