@@ -1,7 +1,7 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
 image_repo := "ghcr.io/nervix-io/nervix-k8s-operator"
-image_tag := image_repo + ":dev"
+image_tag := image_repo + ":latest-debian"
 
 fmt:
     cargo fmt
@@ -28,7 +28,7 @@ helm-lint:
 helm-template:
     helm template nervix-k8s-operator charts/nervix-k8s-operator --namespace nervix-system
 
-docker-build tag=image_tag platform="linux/amd64" push="false" cache_from="" cache_to="":
+docker-build tag=image_tag platform="linux/amd64" push="false":
     #!/usr/bin/env bash
     set -euo pipefail
     normalized_platform="{{ platform }}"
@@ -39,25 +39,22 @@ docker-build tag=image_tag platform="linux/amd64" push="false" cache_from="" cac
     if [[ "{{ push }}" == "true" ]]; then
         output_flag="--push"
     fi
-    cache_from_flag=""
-    if [[ -n "{{ cache_from }}" ]]; then
-        cache_from_flag="--cache-from={{ cache_from }}"
-    fi
-    cache_to_flag=""
-    if [[ -n "{{ cache_to }}" ]]; then
-        cache_to_flag="--cache-to={{ cache_to }}"
-    fi
+    tag_flags=()
+    for image_tag in {{ tag }}; do
+        tag_flags+=("-t" "${image_tag}")
+    done
     docker buildx build \
         --progress=plain \
         --platform "${normalized_platform}" \
-        ${cache_from_flag} \
-        ${cache_to_flag} \
-        -t "{{ tag }}" \
+        "${tag_flags[@]}" \
         "${output_flag}" \
         .
 
 docker-build-local tag=image_tag:
     docker build -t "{{ tag }}" .
+
+docker-pull tag=image_tag:
+    docker pull "{{ tag }}"
 
 minikube-start profile="nervix-operator-test" kubernetes_version="v1.34.0":
     minikube start -p "{{ profile }}" --driver=docker --kubernetes-version="{{ kubernetes_version }}"
@@ -109,7 +106,7 @@ minikube-cli-check profile="nervix-operator-test" cli_bin="nervix-cli":
 
 minikube-test profile="nervix-operator-test" tag=image_tag cli_bin="nervix-cli":
     just minikube-start "{{ profile }}"
-    just docker-build-local "{{ tag }}"
+    just docker-pull "{{ tag }}"
     just minikube-load-operator "{{ profile }}" "{{ tag }}"
     just minikube-deploy "{{ profile }}" "{{ tag }}"
     just minikube-create-cluster "{{ profile }}"
