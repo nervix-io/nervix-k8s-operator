@@ -2,7 +2,7 @@ FROM rust:1.95-alpine AS builder
 
 WORKDIR /workspace
 RUN apk add --no-cache build-base perl pkgconf
-RUN cargo install cargo-auditable --version 0.7.4 --locked
+RUN cargo install cargo-auditable --locked
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 RUN cargo auditable build --release
