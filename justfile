@@ -52,3 +52,43 @@ docker-build tag=image_tag platform="linux/amd64" push="false" cache_from="" cac
 
 docker-build-local tag=image_tag:
     docker build -t "{{ tag }}" .
+
+minikube-start profile="nervix-operator-test" kubernetes_version="v1.34.0":
+    minikube start -p "{{ profile }}" --driver=docker --kubernetes-version="{{ kubernetes_version }}"
+
+minikube-load-operator profile="nervix-operator-test" tag=image_tag:
+    minikube -p "{{ profile }}" image load "{{ tag }}"
+
+minikube-deploy profile="nervix-operator-test" tag=image_tag:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    kubectl --context "{{ profile }}" apply -f deploy/crd.yaml
+    kubectl --context "{{ profile }}" apply -f deploy/operator.yaml
+    kubectl --context "{{ profile }}" -n nervix-system set image deployment/nervix-k8s-operator operator="{{ tag }}"
+    kubectl --context "{{ profile }}" -n nervix-system rollout status deployment/nervix-k8s-operator --timeout=180s
+
+minikube-create-cluster profile="nervix-operator-test":
+    kubectl --context "{{ profile }}" apply -f examples/nervix-cluster.yaml
+    kubectl --context "{{ profile }}" -n nervix rollout status statefulset/nervix --timeout=300s
+    kubectl --context "{{ profile }}" -n nervix get nervixcluster nervix -o wide
+
+minikube-cli-check profile="nervix-operator-test" cli_bin="nervix-cli":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    server="http://$(minikube -p "{{ profile }}" ip):31390"
+    deadline=$((SECONDS + 120))
+    until "{{ cli_bin }}" --server "${server}" --command "SHOW CLUSTER STATUS;"; do
+        if (( SECONDS >= deadline )); then
+            echo "nervix-cli could not connect to ${server}" >&2
+            exit 1
+        fi
+        sleep 5
+    done
+
+minikube-test profile="nervix-operator-test" tag=image_tag cli_bin="nervix-cli":
+    just minikube-start "{{ profile }}"
+    just docker-build-local "{{ tag }}"
+    just minikube-load-operator "{{ profile }}" "{{ tag }}"
+    just minikube-deploy "{{ profile }}" "{{ tag }}"
+    just minikube-create-cluster "{{ profile }}"
+    just minikube-cli-check "{{ profile }}" "{{ cli_bin }}"
