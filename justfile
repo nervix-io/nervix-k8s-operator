@@ -68,9 +68,14 @@ minikube-load-operator profile="nervix-operator-test" tag=image_tag:
 minikube-deploy profile="nervix-operator-test" tag=image_tag:
     #!/usr/bin/env bash
     set -euo pipefail
-    kubectl --context "{{ profile }}" apply -f deploy/crd.yaml
-    kubectl --context "{{ profile }}" apply -f deploy/operator.yaml
-    kubectl --context "{{ profile }}" -n nervix-system set image deployment/nervix-k8s-operator operator="{{ tag }}"
+    image="{{ tag }}"
+    repository="${image%:*}"
+    tag="${image##*:}"
+    helm --kube-context "{{ profile }}" upgrade --install nervix-k8s-operator charts/nervix-k8s-operator \
+        --namespace nervix-system \
+        --create-namespace \
+        --set image.repository="${repository}" \
+        --set image.tag="${tag}"
     kubectl --context "{{ profile }}" -n nervix-system rollout status deployment/nervix-k8s-operator --timeout=180s
 
 minikube-create-cluster profile="nervix-operator-test":
