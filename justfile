@@ -18,9 +18,15 @@ audit:
 test:
     cargo test --all-features --all-targets
 
-validate: fmt lint audit test
+validate: fmt lint audit test helm-lint helm-template
 
-validate-ci: fmt-check lint audit test
+validate-ci: fmt-check lint audit test helm-lint helm-template
+
+helm-lint:
+    helm lint charts/nervix-k8s-operator
+
+helm-template:
+    helm template nervix-k8s-operator charts/nervix-k8s-operator --namespace nervix-system
 
 docker-build tag=image_tag platform="linux/amd64" push="false" cache_from="" cache_to="":
     #!/usr/bin/env bash

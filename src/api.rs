@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
     plural = "nervixclusters",
     namespaced,
     status = "NervixClusterStatus",
-    shortname = "nvc",
+    shortname = "nvx",
     derive = "PartialEq",
     printcolumn = r#"{"name":"Replicas","type":"integer","jsonPath":".spec.replicas"}"#,
     printcolumn = r#"{"name":"Ready","type":"integer","jsonPath":".status.readyReplicas"}"#,
