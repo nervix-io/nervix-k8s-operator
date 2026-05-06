@@ -1,7 +1,7 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
 image_repo := "ghcr.io/nervix-io/nervix-k8s-operator"
-image_tag := image_repo + ":latest-debian"
+image_tag := image_repo + ":debian-latest"
 
 fmt:
     cargo fmt

@@ -52,7 +52,7 @@ metadata:
   name: nervix
   namespace: nervix
 spec:
-  image: ghcr.io/nervix-io/nervix:latest-debian
+  image: ghcr.io/nervix-io/nervix:debian-latest
   replicas: 3
   clusterId: nervix-kube
   localAccess:

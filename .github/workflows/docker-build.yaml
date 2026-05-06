@@ -151,7 +151,7 @@ jobs:
 
       - name: Install nervix-cli
         run: |
-          image="ghcr.io/nervix-io/nervix:latest-debian"
+          image="ghcr.io/nervix-io/nervix:debian-latest"
           docker pull "${image}"
           container="$(docker create "${image}")"
           trap 'docker rm -f "${container}" >/dev/null 2>&1 || true' EXIT
