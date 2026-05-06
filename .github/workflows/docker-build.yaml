@@ -45,6 +45,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup QEMU
+        uses: docker/setup-qemu-action@v3
+
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -104,3 +107,68 @@ jobs:
             -t "${base}:latest" \
             "${base}:${ts}-alpine-amd64" \
             "${base}:${ts}-alpine-arm64"
+
+  minikube:
+    name: minikube
+    needs: [meta, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Install minikube
+        run: |
+          curl -Lo minikube https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
+          sudo install minikube /usr/local/bin/minikube
+
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install nervix-cli
+        run: |
+          image="ghcr.io/nervix-io/nervix:20260505051615-debian"
+          docker pull "${image}"
+          container="$(docker create "${image}")"
+          trap 'docker rm -f "${container}" >/dev/null 2>&1 || true' EXIT
+          docker cp "${container}:/usr/local/bin/nervix-cli" ./nervix-cli
+          chmod +x ./nervix-cli
+
+      - name: Deploy operator and verify cluster
+        run: |
+          profile="nervix-operator-ci"
+          operator_image="ghcr.io/nervix-io/nervix-k8s-operator:${{ needs.meta.outputs.timestamp }}-alpine-amd64"
+
+          just minikube-start "${profile}"
+
+          if [[ "${{ github.event_name }}" != "pull_request" \
+            || "${{ github.event.pull_request.head.repo.full_name }}" == "${{ github.repository }}" ]]; then
+            docker pull "${operator_image}"
+          else
+            just docker-build-local "${operator_image}"
+          fi
+
+          just minikube-load-operator "${profile}" "${operator_image}"
+          just minikube-deploy "${profile}" "${operator_image}"
+          just minikube-create-cluster "${profile}"
+          just minikube-cli-check "${profile}" ./nervix-cli
+
+      - name: Dump minikube state
+        if: always()
+        run: |
+          kubectl --context nervix-operator-ci get nervixclusters -A || true
+          kubectl --context nervix-operator-ci get pods,svc,statefulset,pvc -A || true
+          kubectl --context nervix-operator-ci -n nervix-system logs deployment/nervix-k8s-operator --tail=200 || true
