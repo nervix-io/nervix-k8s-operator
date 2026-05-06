@@ -48,8 +48,8 @@ jobs:
       - name: Setup QEMU
         uses: docker/setup-qemu-action@v3
 
-      - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Setup Docker Builder
+        uses: useblacksmith/setup-docker-builder@v1
 
       - name: Install just
         uses: taiki-e/install-action@v2
@@ -67,19 +67,25 @@ jobs:
       - name: Build and optionally push arch image
         run: |
           image_repo="ghcr.io/nervix-io/nervix-k8s-operator"
-          tag="${image_repo}:${{ needs.meta.outputs.timestamp }}-alpine-${{ matrix.arch }}"
-          cache_scope="nervix-k8s-operator-alpine-${{ matrix.arch }}"
+          tag="${image_repo}:${{ needs.meta.outputs.timestamp }}-${{ matrix.arch }}"
+          latest_tag="${image_repo}:latest-${{ matrix.arch }}"
           push_image="true"
           if [[ "${{ github.event_name }}" == "pull_request" \
             && "${{ github.event.pull_request.head.repo.full_name }}" != "${{ github.repository }}" ]]; then
             push_image="false"
           fi
+          tags=("${tag}")
+          if [[ "${push_image}" == "true" ]]; then
+            tags+=("${latest_tag}")
+          fi
+          tag_args=()
+          for image_tag in "${tags[@]}"; do
+            tag_args+=("${image_tag}")
+          done
           just docker-build \
-            "${tag}" \
+            "${tag_args[*]}" \
             "${{ matrix.platform }}" \
-            "${push_image}" \
-            "type=gha,scope=${cache_scope}" \
-            "type=gha,mode=max,scope=${cache_scope}"
+            "${push_image}"
 
   publish:
     name: publish-manifest
@@ -103,10 +109,10 @@ jobs:
           base="ghcr.io/nervix-io/nervix-k8s-operator"
           ts="${{ needs.meta.outputs.timestamp }}"
           docker buildx imagetools create \
-            -t "${base}:${ts}-alpine" \
+            -t "${base}:${ts}" \
             -t "${base}:latest" \
-            "${base}:${ts}-alpine-amd64" \
-            "${base}:${ts}-alpine-arm64"
+            "${base}:${ts}-amd64" \
+            "${base}:${ts}-arm64"
 
   minikube:
     name: minikube
@@ -145,7 +151,7 @@ jobs:
 
       - name: Install nervix-cli
         run: |
-          image="ghcr.io/nervix-io/nervix:20260506054031-debian"
+          image="ghcr.io/nervix-io/nervix:debian-latest"
           docker pull "${image}"
           container="$(docker create "${image}")"
           trap 'docker rm -f "${container}" >/dev/null 2>&1 || true' EXIT
@@ -155,7 +161,7 @@ jobs:
       - name: Deploy operator and verify cluster
         run: |
           profile="nervix-operator-ci"
-          operator_image="ghcr.io/nervix-io/nervix-k8s-operator:${{ needs.meta.outputs.timestamp }}-alpine-amd64"
+          operator_image="ghcr.io/nervix-io/nervix-k8s-operator:${{ needs.meta.outputs.timestamp }}-amd64"
 
           just minikube-start "${profile}"
 

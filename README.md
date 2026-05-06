@@ -39,9 +39,9 @@ helm upgrade --install nervix-k8s-operator ./charts/nervix-k8s-operator \
   --create-namespace
 ```
 
-The image in `deploy/operator.yaml` is a placeholder until the operator is
-published. For local clusters, replace it with an image you build and load into
-the cluster.
+The default operator image is `ghcr.io/nervix-io/nervix-k8s-operator:latest`.
+For minikube smoke tests, `just minikube-test` pulls that image and loads it
+into the cluster before installing the chart.
 
 ## Example
 
@@ -52,7 +52,7 @@ metadata:
   name: nervix
   namespace: nervix
 spec:
-  image: ghcr.io/nervix-io/nervix:20260506054031-debian
+  image: ghcr.io/nervix-io/nervix:debian-latest
   replicas: 3
   clusterId: nervix-kube
   localAccess:

@@ -60,7 +60,7 @@ spec:
       serviceAccountName: nervix-k8s-operator
       containers:
         - name: operator
-          image: ghcr.io/nervix-io/nervix-k8s-operator:dev
+          image: ghcr.io/nervix-io/nervix-k8s-operator:latest
           imagePullPolicy: IfNotPresent
           args:
             - run
