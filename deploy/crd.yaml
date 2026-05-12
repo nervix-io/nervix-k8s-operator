@@ -46,6 +46,10 @@ spec:
                     default: 31090
                     format: int32
                     type: integer
+                  bootstrapWebConsoleNodePort:
+                    default: 31420
+                    format: int32
+                    type: integer
                   enabled:
                     default: true
                     type: boolean
@@ -55,6 +59,10 @@ spec:
                     type: integer
                   firstNodeObservabilityNodePort:
                     default: 31091
+                    format: int32
+                    type: integer
+                  firstNodeWebConsoleNodePort:
+                    default: 31421
                     format: int32
                     type: integer
                 type: object
@@ -107,6 +115,8 @@ spec:
                     ordinal:
                       format: int32
                       type: integer
+                    webConsoleAdvertiseAddress:
+                      type: string
                   required:
                   - clusterAdvertiseAddress
                   - clusterApiAdvertiseAddress
@@ -114,6 +124,7 @@ spec:
                   - interconnectAdvertiseAddress
                   - name
                   - ordinal
+                  - webConsoleAdvertiseAddress
                   type: object
                 type: array
               observedGeneration:

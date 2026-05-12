@@ -40,10 +40,14 @@ pub struct LocalAccessSpec {
     pub enabled: bool,
     #[serde(default = "default_bootstrap_grpc_node_port")]
     pub bootstrap_grpc_node_port: i32,
+    #[serde(default = "default_bootstrap_web_console_node_port")]
+    pub bootstrap_web_console_node_port: i32,
     #[serde(default = "default_bootstrap_observability_node_port")]
     pub bootstrap_observability_node_port: i32,
     #[serde(default = "default_first_node_grpc_node_port")]
     pub first_node_grpc_node_port: i32,
+    #[serde(default = "default_first_node_web_console_node_port")]
+    pub first_node_web_console_node_port: i32,
     #[serde(default = "default_first_node_observability_node_port")]
     pub first_node_observability_node_port: i32,
 }
@@ -88,6 +92,7 @@ pub struct NervixNodeStatus {
     pub name: String,
     pub ordinal: i32,
     pub grpc_advertise_address: String,
+    pub web_console_advertise_address: String,
     pub cluster_advertise_address: String,
     pub cluster_api_advertise_address: String,
     pub interconnect_advertise_address: String,
@@ -131,12 +136,20 @@ fn default_bootstrap_grpc_node_port() -> i32 {
     31390
 }
 
+fn default_bootstrap_web_console_node_port() -> i32 {
+    31420
+}
+
 fn default_bootstrap_observability_node_port() -> i32 {
     31090
 }
 
 fn default_first_node_grpc_node_port() -> i32 {
     31391
+}
+
+fn default_first_node_web_console_node_port() -> i32 {
+    31421
 }
 
 fn default_first_node_observability_node_port() -> i32 {

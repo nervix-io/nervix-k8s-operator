@@ -9,132 +9,142 @@ spec:
     kind: NervixCluster
     plural: nervixclusters
     shortNames:
-    - nvx
+      - nvx
     singular: nervixcluster
   scope: Namespaced
   versions:
-  - additionalPrinterColumns:
-    - jsonPath: .spec.replicas
-      name: Replicas
-      type: integer
-    - jsonPath: .status.readyReplicas
-      name: Ready
-      type: integer
-    - jsonPath: .spec.image
-      name: Image
-      type: string
-    name: v1alpha1
-    schema:
-      openAPIV3Schema:
-        description: Auto-generated derived type for NervixClusterSpec via `CustomResource`
-        properties:
-          spec:
-            properties:
-              clusterId:
-                nullable: true
-                type: string
-              image:
-                type: string
-              localAccess:
-                nullable: true
-                properties:
-                  bootstrapGrpcNodePort:
-                    default: 31390
-                    format: int32
-                    type: integer
-                  bootstrapObservabilityNodePort:
-                    default: 31090
-                    format: int32
-                    type: integer
-                  enabled:
-                    default: true
-                    type: boolean
-                  firstNodeGrpcNodePort:
-                    default: 31391
-                    format: int32
-                    type: integer
-                  firstNodeObservabilityNodePort:
-                    default: 31091
-                    format: int32
-                    type: integer
-                type: object
-              logFilter:
-                nullable: true
-                type: string
-              replicas:
-                default: 3
-                format: int32
-                type: integer
-              resources:
-                default:
-                  cpuRequest: 250m
-                  memoryLimit: 2Gi
-                  memoryRequest: 512Mi
-                properties:
-                  cpuRequest:
-                    default: 250m
-                    type: string
-                  memoryLimit:
-                    default: 2Gi
-                    type: string
-                  memoryRequest:
-                    default: 512Mi
-                    type: string
-                type: object
-              storage:
-                default: 5Gi
-                type: string
-            required:
-            - image
-            type: object
-          status:
-            nullable: true
-            properties:
-              nodes:
-                default: []
-                items:
+    - additionalPrinterColumns:
+        - jsonPath: .spec.replicas
+          name: Replicas
+          type: integer
+        - jsonPath: .status.readyReplicas
+          name: Ready
+          type: integer
+        - jsonPath: .spec.image
+          name: Image
+          type: string
+      name: v1alpha1
+      schema:
+        openAPIV3Schema:
+          description: Auto-generated derived type for NervixClusterSpec via `CustomResource`
+          properties:
+            spec:
+              properties:
+                clusterId:
+                  nullable: true
+                  type: string
+                image:
+                  type: string
+                localAccess:
+                  nullable: true
                   properties:
-                    clusterAdvertiseAddress:
-                      type: string
-                    clusterApiAdvertiseAddress:
-                      type: string
-                    grpcAdvertiseAddress:
-                      type: string
-                    interconnectAdvertiseAddress:
-                      type: string
-                    name:
-                      type: string
-                    ordinal:
+                    bootstrapGrpcNodePort:
+                      default: 31390
                       format: int32
                       type: integer
-                  required:
-                  - clusterAdvertiseAddress
-                  - clusterApiAdvertiseAddress
-                  - grpcAdvertiseAddress
-                  - interconnectAdvertiseAddress
-                  - name
-                  - ordinal
+                    bootstrapObservabilityNodePort:
+                      default: 31090
+                      format: int32
+                      type: integer
+                    bootstrapWebConsoleNodePort:
+                      default: 31420
+                      format: int32
+                      type: integer
+                    enabled:
+                      default: true
+                      type: boolean
+                    firstNodeGrpcNodePort:
+                      default: 31391
+                      format: int32
+                      type: integer
+                    firstNodeObservabilityNodePort:
+                      default: 31091
+                      format: int32
+                      type: integer
+                    firstNodeWebConsoleNodePort:
+                      default: 31421
+                      format: int32
+                      type: integer
                   type: object
-                type: array
-              observedGeneration:
-                format: int64
-                nullable: true
-                type: integer
-              readyReplicas:
-                default: 0
-                format: int32
-                type: integer
-              replicas:
-                default: 0
-                format: int32
-                type: integer
-            type: object
-        required:
-        - spec
-        title: NervixCluster
-        type: object
-    served: true
-    storage: true
-    subresources:
-      status: {}
-
+                logFilter:
+                  nullable: true
+                  type: string
+                replicas:
+                  default: 3
+                  format: int32
+                  type: integer
+                resources:
+                  default:
+                    cpuRequest: 250m
+                    memoryLimit: 2Gi
+                    memoryRequest: 512Mi
+                  properties:
+                    cpuRequest:
+                      default: 250m
+                      type: string
+                    memoryLimit:
+                      default: 2Gi
+                      type: string
+                    memoryRequest:
+                      default: 512Mi
+                      type: string
+                  type: object
+                storage:
+                  default: 5Gi
+                  type: string
+              required:
+                - image
+              type: object
+            status:
+              nullable: true
+              properties:
+                nodes:
+                  default: []
+                  items:
+                    properties:
+                      clusterAdvertiseAddress:
+                        type: string
+                      clusterApiAdvertiseAddress:
+                        type: string
+                      grpcAdvertiseAddress:
+                        type: string
+                      interconnectAdvertiseAddress:
+                        type: string
+                      name:
+                        type: string
+                      ordinal:
+                        format: int32
+                        type: integer
+                      webConsoleAdvertiseAddress:
+                        type: string
+                    required:
+                      - clusterAdvertiseAddress
+                      - clusterApiAdvertiseAddress
+                      - grpcAdvertiseAddress
+                      - interconnectAdvertiseAddress
+                      - name
+                      - ordinal
+                      - webConsoleAdvertiseAddress
+                    type: object
+                  type: array
+                observedGeneration:
+                  format: int64
+                  nullable: true
+                  type: integer
+                readyReplicas:
+                  default: 0
+                  format: int32
+                  type: integer
+                replicas:
+                  default: 0
+                  format: int32
+                  type: integer
+              type: object
+          required:
+            - spec
+          title: NervixCluster
+          type: object
+      served: true
+      storage: true
+      subresources:
+        status: {}

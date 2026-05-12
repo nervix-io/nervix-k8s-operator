@@ -17,8 +17,10 @@ spec:
   localAccess:
     enabled: true
     bootstrapGrpcNodePort: 31390
+    bootstrapWebConsoleNodePort: 31420
     bootstrapObservabilityNodePort: 31090
     firstNodeGrpcNodePort: 31391
+    firstNodeWebConsoleNodePort: 31421
     firstNodeObservabilityNodePort: 31091
   resources:
     cpuRequest: 250m
