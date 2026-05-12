@@ -7,7 +7,7 @@ cluster. Each custom resource owns one Nervix application cluster and reconciles
 
 - a headless service for stable StatefulSet pod DNS
 - a ClusterIP service for in-cluster clients
-- optional bootstrap and per-node NodePort services for local access
+- optional bootstrap and per-node NodePort services for gRPC and web console local access
 - a StatefulSet with one PVC per Nervix node
 - status with desired/ready replica counts and per-node advertised addresses
 
@@ -42,6 +42,10 @@ helm upgrade --install nervix-k8s-operator ./charts/nervix-k8s-operator \
 The default operator image is `ghcr.io/nervix-io/nervix-k8s-operator:latest`.
 For minikube smoke tests, `just minikube-test` pulls that image and loads it
 into the cluster before installing the chart.
+
+With local access enabled, the shared entry service exposes gRPC on NodePort
+`31390` and the web console on NodePort `31420`. Per-node NodePorts are used as
+the advertised direct endpoints after the server redirects clients to the leader.
 
 ## Example
 

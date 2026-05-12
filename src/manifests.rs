@@ -26,6 +26,7 @@ const INTERCONNECT_PORT: i32 = 47395;
 const HTTP_PORT: i32 = 8080;
 const HTTPS_PORT: i32 = 8443;
 const OBSERVABILITY_PORT: i32 = 9090;
+const WEB_CONSOLE_PORT: i32 = 47420;
 
 pub fn headless_service(cluster: &NervixCluster) -> Service {
     Service {
@@ -45,6 +46,7 @@ pub fn headless_service(cluster: &NervixCluster) -> Service {
                 service_port("interconnect", INTERCONNECT_PORT),
                 service_port("http", HTTP_PORT),
                 service_port("https", HTTPS_PORT),
+                service_port("web-console", WEB_CONSOLE_PORT),
                 service_port("observability", OBSERVABILITY_PORT),
             ]),
             ..Default::default()
@@ -69,6 +71,7 @@ pub fn cluster_service(cluster: &NervixCluster) -> Service {
                 service_port("interconnect", INTERCONNECT_PORT),
                 service_port("http", HTTP_PORT),
                 service_port("https", HTTPS_PORT),
+                service_port("web-console", WEB_CONSOLE_PORT),
                 service_port("observability", OBSERVABILITY_PORT),
             ]),
             ..Default::default()
@@ -86,6 +89,11 @@ pub fn bootstrap_local_service(cluster: &NervixCluster, access: &LocalAccessSpec
             selector: Some(selector_labels(cluster)),
             ports: Some(vec![
                 node_port("grpc", GRPC_PORT, access.bootstrap_grpc_node_port),
+                node_port(
+                    "web-console",
+                    WEB_CONSOLE_PORT,
+                    access.bootstrap_web_console_node_port,
+                ),
                 node_port(
                     "observability",
                     OBSERVABILITY_PORT,
@@ -124,6 +132,11 @@ pub fn node_local_service(
                     "grpc",
                     GRPC_PORT,
                     access.first_node_grpc_node_port + ordinal,
+                ),
+                node_port(
+                    "web-console",
+                    WEB_CONSOLE_PORT,
+                    access.first_node_web_console_node_port + ordinal,
                 ),
                 node_port(
                     "observability",
@@ -218,11 +231,20 @@ fn node_status(namespace: &str, cluster: &NervixCluster, ordinal: i32) -> Nervix
     } else {
         format!("{fqdn}:{GRPC_PORT}")
     };
+    let web_console = if let Some(access) = enabled_local_access(cluster) {
+        format!(
+            "$(HOST_IP):{}",
+            access.first_node_web_console_node_port + ordinal
+        )
+    } else {
+        format!("{fqdn}:{WEB_CONSOLE_PORT}")
+    };
 
     NervixNodeStatus {
         name: pod,
         ordinal,
         grpc_advertise_address: grpc,
+        web_console_advertise_address: web_console,
         cluster_advertise_address: format!("{fqdn}:{GOSSIP_PORT}"),
         cluster_api_advertise_address: format!("{fqdn}:{CLUSTER_API_PORT}"),
         interconnect_advertise_address: format!("{fqdn}:{INTERCONNECT_PORT}"),
@@ -267,6 +289,7 @@ fn container(cluster: &NervixCluster) -> Container {
             container_port("interconnect", INTERCONNECT_PORT, "TCP"),
             container_port("http", HTTP_PORT, "TCP"),
             container_port("https", HTTPS_PORT, "TCP"),
+            container_port("web-console", WEB_CONSOLE_PORT, "TCP"),
             container_port("observability", OBSERVABILITY_PORT, "TCP"),
         ]),
         readiness_probe: Some(http_probe("/readyz", 5, 6)),
@@ -302,6 +325,14 @@ fn startup_script(cluster: &NervixCluster) -> String {
     } else {
         "\"${pod_fqdn}:47391\"".to_string()
     };
+    let web_console_advertise = if let Some(access) = enabled_local_access(cluster) {
+        format!(
+            "\"${{HOST_IP}}:$(({} + ordinal))\"",
+            access.first_node_web_console_node_port
+        )
+    } else {
+        "\"${pod_fqdn}:47420\"".to_string()
+    };
 
     format!(
         r#"ordinal="${{HOSTNAME##*-}}"
@@ -321,6 +352,8 @@ exec /usr/local/bin/nervix \
   --http-listen-addr 0.0.0.0:8080 \
   --https-listen-addr 0.0.0.0:8443 \
   --observability-listen-addr 0.0.0.0:9090 \
+  --web-console-listen-addr 0.0.0.0:47420 \
+  --web-console-advertise-addr {web_console_advertise} \
   --cluster-id {cluster_id} \
   --node-id "${{node_id}}" \
   --cluster-listen-addr 0.0.0.0:47392 \
@@ -505,6 +538,8 @@ mod tests {
 
         let bootstrap = bootstrap_local_service(&cluster, access);
         assert_eq!(bootstrap.name_any(), "nervix-local");
+        assert_service_port(&bootstrap, "grpc", GRPC_PORT, Some(31390));
+        assert_service_port(&bootstrap, "web-console", WEB_CONSOLE_PORT, Some(31420));
 
         let node_services = (0..cluster.spec.normalized_replicas())
             .map(|ordinal| node_local_service(&cluster, access, ordinal).name_any())
@@ -527,6 +562,24 @@ mod tests {
         assert!(script.contains("--allow-bootstrap"));
         assert!(script.contains("--cluster-bootstrap-host nervix-0.nervix-headless.${POD_NAMESPACE}.svc.cluster.local:47392"));
         assert!(script.contains("--replica-count 3"));
+        assert!(script.contains("--web-console-listen-addr 0.0.0.0:47420"));
+        assert!(
+            script.contains("--web-console-advertise-addr \"${HOST_IP}:$((31421 + ordinal))\"")
+        );
+    }
+
+    #[test]
+    fn status_includes_per_node_web_console_advertise_address() {
+        let status = status(&cluster(), 3);
+
+        assert_eq!(
+            status.nodes[0].web_console_advertise_address,
+            "$(HOST_IP):31421"
+        );
+        assert_eq!(
+            status.nodes[2].web_console_advertise_address,
+            "$(HOST_IP):31423"
+        );
     }
 
     fn cluster() -> NervixCluster {
@@ -541,12 +594,30 @@ mod tests {
                 local_access: Some(LocalAccessSpec {
                     enabled: true,
                     bootstrap_grpc_node_port: 31390,
+                    bootstrap_web_console_node_port: 31420,
                     bootstrap_observability_node_port: 31090,
                     first_node_grpc_node_port: 31391,
+                    first_node_web_console_node_port: 31421,
                     first_node_observability_node_port: 31091,
                 }),
                 resources: Default::default(),
             },
         )
+    }
+
+    fn assert_service_port(service: &Service, name: &str, port: i32, node_port: Option<i32>) {
+        let service_port = service
+            .spec
+            .as_ref()
+            .and_then(|spec| spec.ports.as_ref())
+            .and_then(|ports| {
+                ports
+                    .iter()
+                    .find(|service_port| service_port.name.as_deref() == Some(name))
+            })
+            .expect("service port exists");
+
+        assert_eq!(service_port.port, port);
+        assert_eq!(service_port.node_port, node_port);
     }
 }
