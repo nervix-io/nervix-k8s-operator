@@ -4,10 +4,10 @@ use k8s_openapi::{
     api::{
         apps::v1::{StatefulSet, StatefulSetSpec},
         core::v1::{
-            Container, ContainerPort, EnvVar, EnvVarSource, HTTPGetAction, ObjectFieldSelector,
-            PersistentVolumeClaim, PersistentVolumeClaimSpec, PodSecurityContext, PodSpec,
-            PodTemplateSpec, Probe, ResourceRequirements, SecurityContext, Service, ServicePort,
-            ServiceSpec, VolumeMount,
+            Container, ContainerPort, EnvVar, EnvVarSource, ExecAction, HTTPGetAction,
+            ObjectFieldSelector, PersistentVolumeClaim, PersistentVolumeClaimSpec,
+            PodSecurityContext, PodSpec, PodTemplateSpec, Probe, ResourceRequirements,
+            SecretKeySelector, SecurityContext, Service, ServicePort, ServiceSpec, VolumeMount,
         },
     },
     apimachinery::pkg::{
@@ -16,7 +16,10 @@ use k8s_openapi::{
 };
 use kube::{Resource, ResourceExt};
 
-use crate::api::{LocalAccessSpec, NervixCluster, NervixClusterStatus, NervixNodeStatus};
+use crate::api::{
+    LocalAccessSpec, NervixCluster, NervixClusterInitializationPhase, NervixClusterStatus,
+    NervixNodeStatus, SecretKeyRef,
+};
 
 const APP_NAME: &str = "nervix";
 const GRPC_PORT: i32 = 47391;
@@ -27,6 +30,13 @@ const HTTP_PORT: i32 = 8080;
 const HTTPS_PORT: i32 = 8443;
 const OBSERVABILITY_PORT: i32 = 9090;
 const WEB_CONSOLE_PORT: i32 = 47420;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum StatefulSetMode {
+    Initializing,
+    RemovingCredentials,
+    Running,
+}
 
 pub fn headless_service(cluster: &NervixCluster) -> Service {
     Service {
@@ -150,12 +160,15 @@ pub fn node_local_service(
     }
 }
 
-pub fn stateful_set(cluster: &NervixCluster) -> StatefulSet {
+pub fn stateful_set(cluster: &NervixCluster, mode: StatefulSetMode) -> StatefulSet {
     let name = cluster.name_any();
     let spec = &cluster.spec;
     let labels = component_labels(cluster, "application");
     let selector = selector_labels(cluster);
-    let replicas = spec.normalized_replicas();
+    let replicas = match mode {
+        StatefulSetMode::Initializing | StatefulSetMode::RemovingCredentials => 1,
+        StatefulSetMode::Running => spec.normalized_replicas(),
+    };
 
     StatefulSet {
         metadata: child_metadata(cluster, &name, labels.clone()),
@@ -179,7 +192,7 @@ pub fn stateful_set(cluster: &NervixCluster) -> StatefulSet {
                         ..Default::default()
                     }),
                     termination_grace_period_seconds: Some(30),
-                    containers: vec![container(cluster)],
+                    containers: vec![container(cluster, mode)],
                     ..Default::default()
                 }),
             },
@@ -205,12 +218,17 @@ pub fn stateful_set(cluster: &NervixCluster) -> StatefulSet {
     }
 }
 
-pub fn status(cluster: &NervixCluster, ready_replicas: i32) -> NervixClusterStatus {
+pub fn status(
+    cluster: &NervixCluster,
+    ready_replicas: i32,
+    initialization_phase: Option<NervixClusterInitializationPhase>,
+) -> NervixClusterStatus {
     let namespace = cluster.namespace().unwrap_or_else(|| "default".to_string());
     let replicas = cluster.spec.normalized_replicas();
 
     NervixClusterStatus {
         observed_generation: cluster.metadata.generation,
+        initialization_phase,
         ready_replicas,
         replicas,
         nodes: (0..replicas)
@@ -251,8 +269,27 @@ fn node_status(namespace: &str, cluster: &NervixCluster, ordinal: i32) -> Nervix
     }
 }
 
-fn container(cluster: &NervixCluster) -> Container {
+fn container(cluster: &NervixCluster, mode: StatefulSetMode) -> Container {
     let spec = &cluster.spec;
+    let mut env = vec![
+        field_env("POD_NAMESPACE", "metadata.namespace"),
+        field_env("HOST_IP", "status.hostIP"),
+        EnvVar {
+            name: "RUST_LOG".to_string(),
+            value: Some(
+                spec.log_filter
+                    .clone()
+                    .unwrap_or_else(|| "info,nervix=info".to_string()),
+            ),
+            ..Default::default()
+        },
+    ];
+    if mode == StatefulSetMode::Initializing
+        && let Some(secret_ref) = &spec.initial_default_user_password_secret_ref
+    {
+        env.push(secret_env("NERVIX_INIT_DEFAULT_USER_PASSWORD", secret_ref));
+    }
+
     Container {
         name: APP_NAME.to_string(),
         image: Some(spec.image.clone()),
@@ -269,19 +306,7 @@ fn container(cluster: &NervixCluster) -> Container {
             "-ec".to_string(),
             startup_script(cluster),
         ]),
-        env: Some(vec![
-            field_env("POD_NAMESPACE", "metadata.namespace"),
-            field_env("HOST_IP", "status.hostIP"),
-            EnvVar {
-                name: "RUST_LOG".to_string(),
-                value: Some(
-                    spec.log_filter
-                        .clone()
-                        .unwrap_or_else(|| "info,nervix=info".to_string()),
-                ),
-                ..Default::default()
-            },
-        ]),
+        env: Some(env),
         ports: Some(vec![
             container_port("grpc", GRPC_PORT, "TCP"),
             container_port("gossip", GOSSIP_PORT, "UDP"),
@@ -292,7 +317,12 @@ fn container(cluster: &NervixCluster) -> Container {
             container_port("web-console", WEB_CONSOLE_PORT, "TCP"),
             container_port("observability", OBSERVABILITY_PORT, "TCP"),
         ]),
-        readiness_probe: Some(http_probe("/readyz", 5, 6)),
+        readiness_probe: Some(match mode {
+            StatefulSetMode::Initializing => initial_password_probe(),
+            StatefulSetMode::RemovingCredentials | StatefulSetMode::Running => {
+                http_probe("/readyz", 5, 6)
+            }
+        }),
         liveness_probe: Some(http_probe("/livez", 10, 3)),
         startup_probe: Some(http_probe("/livez", 5, 24)),
         resources: Some(ResourceRequirements {
@@ -345,7 +375,7 @@ else
   bootstrap_args="--cluster-bootstrap-host {name}-0.{headless}.${{POD_NAMESPACE}}.svc.cluster.local:47392"
 fi
 
-exec /usr/local/bin/nervix \
+exec /usr/local/bin/nervix-server \
   --addr 0.0.0.0:47391 \
   --grpc-mode http \
   --grpc-advertise-addr {grpc_advertise} \
@@ -466,6 +496,40 @@ fn field_env(name: &str, field_path: &str) -> EnvVar {
     }
 }
 
+fn secret_env(name: &str, secret_ref: &SecretKeyRef) -> EnvVar {
+    EnvVar {
+        name: name.to_string(),
+        value_from: Some(EnvVarSource {
+            secret_key_ref: Some(SecretKeySelector {
+                name: secret_ref.name.clone(),
+                key: secret_ref.key.clone(),
+                optional: Some(false),
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+fn initial_password_probe() -> Probe {
+    Probe {
+        exec: Some(ExecAction {
+            command: Some(vec![
+                "/bin/sh".to_string(),
+                "-ec".to_string(),
+                "NERVIX_PASSWORD=\"${NERVIX_INIT_DEFAULT_USER_PASSWORD}\" \
+exec /usr/local/bin/nervix-cli \
+--server http://127.0.0.1:47391 \
+--command 'SHOW CLUSTER STATUS;' >/dev/null"
+                    .to_string(),
+            ]),
+        }),
+        period_seconds: Some(5),
+        failure_threshold: Some(24),
+        ..Default::default()
+    }
+}
+
 fn http_probe(path: &str, period_seconds: i32, failure_threshold: i32) -> Probe {
     Probe {
         http_get: Some(HTTPGetAction {
@@ -514,7 +578,7 @@ mod tests {
     fn stateful_set_pod_labels_satisfy_service_selector() {
         let cluster = cluster();
         let service = cluster_service(&cluster);
-        let stateful_set = stateful_set(&cluster);
+        let stateful_set = stateful_set(&cluster, StatefulSetMode::Running);
 
         let selector = service.spec.unwrap().selector.unwrap();
         let pod_labels = stateful_set
@@ -569,8 +633,69 @@ mod tests {
     }
 
     #[test]
+    fn initialization_uses_one_replica_and_secret_backed_authenticated_readiness() {
+        let stateful_set = stateful_set(&cluster(), StatefulSetMode::Initializing);
+        let spec = stateful_set.spec.expect("stateful set spec exists");
+        assert_eq!(spec.replicas, Some(1));
+
+        let container = &spec.template.spec.expect("pod spec exists").containers[0];
+        let password_env = container
+            .env
+            .as_ref()
+            .and_then(|env| {
+                env.iter()
+                    .find(|env| env.name == "NERVIX_INIT_DEFAULT_USER_PASSWORD")
+            })
+            .expect("initial password environment variable exists");
+        let secret_ref = password_env
+            .value_from
+            .as_ref()
+            .and_then(|source| source.secret_key_ref.as_ref())
+            .expect("initial password comes from a Secret");
+        assert_eq!(secret_ref.name, "nervix-initial-password");
+        assert_eq!(secret_ref.key, "password");
+
+        let probe_command = container
+            .readiness_probe
+            .as_ref()
+            .and_then(|probe| probe.exec.as_ref())
+            .and_then(|action| action.command.as_ref())
+            .expect("initialization uses an exec readiness probe")
+            .join(" ");
+        assert!(probe_command.contains("/usr/local/bin/nervix-cli"));
+        assert!(probe_command.contains("SHOW CLUSTER STATUS;"));
+        assert!(probe_command.contains("NERVIX_PASSWORD=\"${NERVIX_INIT_DEFAULT_USER_PASSWORD}\""));
+    }
+
+    #[test]
+    fn credentials_are_removed_from_one_replica_before_normal_scale_up() {
+        let cluster = cluster();
+        let removing_credentials = stateful_set(&cluster, StatefulSetMode::RemovingCredentials);
+        let removing_spec = removing_credentials
+            .spec
+            .expect("credential-removal StatefulSet spec exists");
+        assert_eq!(removing_spec.replicas, Some(1));
+        assert_no_initial_password(&removing_spec.template);
+        assert!(
+            removing_spec.template.spec.unwrap().containers[0]
+                .readiness_probe
+                .as_ref()
+                .is_some_and(|probe| probe.http_get.is_some())
+        );
+
+        let running = stateful_set(&cluster, StatefulSetMode::Running);
+        let running_spec = running.spec.expect("running StatefulSet spec exists");
+        assert_eq!(running_spec.replicas, Some(3));
+        assert_no_initial_password(&running_spec.template);
+    }
+
+    #[test]
     fn status_includes_per_node_web_console_advertise_address() {
-        let status = status(&cluster(), 3);
+        let status = status(
+            &cluster(),
+            3,
+            Some(NervixClusterInitializationPhase::Initialized),
+        );
 
         assert_eq!(
             status.nodes[0].web_console_advertise_address,
@@ -579,6 +704,10 @@ mod tests {
         assert_eq!(
             status.nodes[2].web_console_advertise_address,
             "$(HOST_IP):31423"
+        );
+        assert_eq!(
+            status.initialization_phase,
+            Some(NervixClusterInitializationPhase::Initialized)
         );
     }
 
@@ -589,6 +718,10 @@ mod tests {
                 image: "ghcr.io/nervix-io/nervix:test".to_string(),
                 replicas: 3,
                 cluster_id: Some("nervix-kube".to_string()),
+                initial_default_user_password_secret_ref: Some(SecretKeyRef {
+                    name: "nervix-initial-password".to_string(),
+                    key: "password".to_string(),
+                }),
                 storage: "5Gi".to_string(),
                 log_filter: None,
                 local_access: Some(LocalAccessSpec {
@@ -619,5 +752,13 @@ mod tests {
 
         assert_eq!(service_port.port, port);
         assert_eq!(service_port.node_port, node_port);
+    }
+
+    fn assert_no_initial_password(template: &PodTemplateSpec) {
+        let container = &template.spec.as_ref().expect("pod spec exists").containers[0];
+        assert!(container.env.as_ref().is_none_or(|env| {
+            env.iter()
+                .all(|env| env.name != "NERVIX_INIT_DEFAULT_USER_PASSWORD")
+        }));
     }
 }

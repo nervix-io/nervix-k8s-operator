@@ -23,6 +23,9 @@ pub struct NervixClusterSpec {
     pub replicas: i32,
     #[serde(default)]
     pub cluster_id: Option<String>,
+    /// Secret key used only while initializing the default user on a new cluster.
+    #[serde(default)]
+    pub initial_default_user_password_secret_ref: Option<SecretKeyRef>,
     #[serde(default = "default_storage")]
     pub storage: String,
     #[serde(default)]
@@ -31,6 +34,15 @@ pub struct NervixClusterSpec {
     pub local_access: Option<LocalAccessSpec>,
     #[serde(default)]
     pub resources: ResourceSpec,
+}
+
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SecretKeyRef {
+    /// Name of a Secret in the NervixCluster namespace.
+    pub name: String,
+    /// Key containing the initial password.
+    pub key: String,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -78,12 +90,21 @@ impl Default for ResourceSpec {
 pub struct NervixClusterStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observed_generation: Option<i64>,
+    pub initialization_phase: Option<NervixClusterInitializationPhase>,
     #[serde(default)]
     pub ready_replicas: i32,
     #[serde(default)]
     pub replicas: i32,
     #[serde(default)]
     pub nodes: Vec<NervixNodeStatus>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NervixClusterInitializationPhase {
+    Initializing,
+    RemovingCredentials,
+    Initialized,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -154,4 +175,20 @@ fn default_first_node_web_console_node_port() -> i32 {
 
 fn default_first_node_observability_node_port() -> i32 {
     31091
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn absent_initialization_phase_serializes_as_null_for_merge_patch_clearing() {
+        let status =
+            serde_json::to_value(NervixClusterStatus::default()).expect("status serializes");
+
+        assert_eq!(
+            status.get("initializationPhase"),
+            Some(&serde_json::Value::Null)
+        );
+    }
 }

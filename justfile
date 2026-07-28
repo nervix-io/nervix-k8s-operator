@@ -88,15 +88,26 @@ minikube-create-cluster profile="nervix-operator-test":
         fi
         sleep 2
     done
+    deadline=$((SECONDS + 300))
+    until [[ "$(kubectl --context "{{ profile }}" -n nervix get nervixcluster/nervix -o jsonpath='{.status.initializationPhase}')" == "initialized" \
+        && "$(kubectl --context "{{ profile }}" -n nervix get statefulset/nervix -o jsonpath='{.spec.replicas}')" == "3" ]]; do
+        if (( SECONDS >= deadline )); then
+            echo "Nervix initialization did not complete before timeout" >&2
+            kubectl --context "{{ profile }}" -n nervix get nervixcluster/nervix -o yaml || true
+            kubectl --context "{{ profile }}" -n nervix get statefulset/nervix -o yaml || true
+            exit 1
+        fi
+        sleep 2
+    done
     kubectl --context "{{ profile }}" -n nervix rollout status statefulset/nervix --timeout=300s
     kubectl --context "{{ profile }}" -n nervix get nervixcluster nervix -o wide
 
-minikube-cli-check profile="nervix-operator-test" cli_bin="nervix-cli":
+minikube-cli-check profile="nervix-operator-test" cli_bin="nervix-cli" password="nervix":
     #!/usr/bin/env bash
     set -euo pipefail
     server="http://$(minikube -p "{{ profile }}" ip):31390"
     deadline=$((SECONDS + 120))
-    until "{{ cli_bin }}" --server "${server}" --command "SHOW CLUSTER STATUS;"; do
+    until "{{ cli_bin }}" --server "${server}" --password "{{ password }}" --command "SHOW CLUSTER STATUS;"; do
         if (( SECONDS >= deadline )); then
             echo "nervix-cli could not connect to ${server}" >&2
             exit 1
