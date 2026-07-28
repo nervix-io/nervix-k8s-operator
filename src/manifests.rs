@@ -345,7 +345,7 @@ else
   bootstrap_args="--cluster-bootstrap-host {name}-0.{headless}.${{POD_NAMESPACE}}.svc.cluster.local:47392"
 fi
 
-exec /usr/local/bin/nervix \
+exec /usr/local/bin/nervix-server \
   --addr 0.0.0.0:47391 \
   --grpc-mode http \
   --grpc-advertise-addr {grpc_advertise} \
