@@ -31,7 +31,7 @@ jobs:
   build:
     name: build-${{ matrix.arch }}
     needs: meta
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -39,8 +39,10 @@ jobs:
         include:
           - platform: linux/amd64
             arch: amd64
+            runner: blacksmith-4vcpu-ubuntu-2404
           - platform: linux/arm64
             arch: arm64
+            runner: blacksmith-4vcpu-ubuntu-2404-arm
     steps:
       - name: Checkout
         uses: actions/checkout@v4
