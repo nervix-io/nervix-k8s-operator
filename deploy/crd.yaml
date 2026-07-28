@@ -35,6 +35,20 @@ spec:
                 type: string
               image:
                 type: string
+              initialDefaultUserPasswordSecretRef:
+                description: Secret key used only while initializing the default user on a new cluster.
+                nullable: true
+                properties:
+                  key:
+                    description: Key containing the initial password.
+                    type: string
+                  name:
+                    description: Name of a Secret in the NervixCluster namespace.
+                    type: string
+                required:
+                - key
+                - name
+                type: object
               localAccess:
                 nullable: true
                 properties:
@@ -98,6 +112,14 @@ spec:
           status:
             nullable: true
             properties:
+              initializationPhase:
+                enum:
+                - initializing
+                - removingCredentials
+                - initialized
+                - null
+                nullable: true
+                type: string
               nodes:
                 default: []
                 items:

@@ -90,7 +90,6 @@ impl Default for ResourceSpec {
 pub struct NervixClusterStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observed_generation: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub initialization_phase: Option<NervixClusterInitializationPhase>,
     #[serde(default)]
     pub ready_replicas: i32,
@@ -176,4 +175,20 @@ fn default_first_node_web_console_node_port() -> i32 {
 
 fn default_first_node_observability_node_port() -> i32 {
     31091
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn absent_initialization_phase_serializes_as_null_for_merge_patch_clearing() {
+        let status =
+            serde_json::to_value(NervixClusterStatus::default()).expect("status serializes");
+
+        assert_eq!(
+            status.get("initializationPhase"),
+            Some(&serde_json::Value::Null)
+        );
+    }
 }

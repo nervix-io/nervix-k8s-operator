@@ -32,5 +32,19 @@ With local access enabled, the shared entry service exposes gRPC on NodePort
 `31390` and the web console on NodePort `31420`. Per-node NodePorts are used as
 the advertised direct endpoints after the server redirects clients to the leader.
 
+New clusters can initialize the `default` user from a Secret in the cluster
+namespace:
+
+```yaml
+spec:
+  initialDefaultUserPasswordSecretRef:
+    name: nervix-initial-password
+    key: password
+```
+
+The operator exposes that Secret to a single bootstrap pod, verifies the user by
+authentication, restarts that pod without the credential, and only then scales
+the StatefulSet to the requested replica count.
+
 The chart installs the `NervixCluster` CRD from `crds/` and deploys the
 cluster-wide operator RBAC by default.

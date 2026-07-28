@@ -3,6 +3,15 @@ kind: Namespace
 metadata:
   name: nervix
 ---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: nervix-initial-password
+  namespace: nervix
+type: Opaque
+stringData:
+  password: nervix
+---
 apiVersion: nervix.io/v1alpha1
 kind: NervixCluster
 metadata:
@@ -12,6 +21,9 @@ spec:
   image: ghcr.io/nervix-io/nervix:debian-latest
   replicas: 3
   clusterId: nervix-kube
+  initialDefaultUserPasswordSecretRef:
+    name: nervix-initial-password
+    key: password
   storage: 5Gi
   logFilter: info,nervix=info
   localAccess:
