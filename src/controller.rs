@@ -11,7 +11,10 @@ use serde_json::json;
 use thiserror::Error;
 use tracing::{error, info, instrument};
 
-use crate::{api::NervixCluster, manifests};
+use crate::{
+    api::{NervixCluster, NervixClusterInitializationPhase},
+    manifests::{self, StatefulSetMode},
+};
 
 #[derive(Clone)]
 struct Context {
@@ -93,28 +96,65 @@ async fn reconcile(cluster: Arc<NervixCluster>, context: Arc<Context>) -> Result
         prune_local_services(&services, &cluster, &BTreeSet::new()).await?;
     }
 
-    let stateful_set = manifests::stateful_set(&cluster);
+    let initialization_phase = initialization_phase(&cluster);
+    let stateful_set_mode = stateful_set_mode(initialization_phase);
+    let stateful_set = manifests::stateful_set(&cluster, stateful_set_mode);
     let stateful_set_name = stateful_set.name_any();
+    let desired_stateful_set_replicas = stateful_set
+        .spec
+        .as_ref()
+        .and_then(|spec| spec.replicas)
+        .unwrap_or_default();
     stateful_sets
         .patch(&stateful_set_name, &apply, &Patch::Apply(&stateful_set))
         .await?;
 
-    let ready_replicas = stateful_sets
-        .get(&stateful_set_name)
-        .await
-        .ok()
-        .and_then(|set| set.status)
+    let observed_stateful_set = stateful_sets.get(&stateful_set_name).await?;
+    let ready_replicas = observed_stateful_set
+        .status
+        .as_ref()
         .and_then(|status| status.ready_replicas)
         .unwrap_or_default();
-    let status = manifests::status(&cluster, ready_replicas);
 
-    clusters
-        .patch_status(
-            &cluster.name_any(),
-            &PatchParams::default(),
-            &Patch::Merge(json!({ "status": status })),
-        )
-        .await?;
+    if stateful_set_rollout_complete(&observed_stateful_set, desired_stateful_set_replicas) {
+        match initialization_phase {
+            Some(NervixClusterInitializationPhase::Initializing) => {
+                patch_status(
+                    &clusters,
+                    &cluster,
+                    ready_replicas,
+                    Some(NervixClusterInitializationPhase::RemovingCredentials),
+                )
+                .await?;
+                apply_stateful_set(
+                    &stateful_sets,
+                    &apply,
+                    manifests::stateful_set(&cluster, StatefulSetMode::RemovingCredentials),
+                )
+                .await?;
+                return Ok(Action::requeue(Duration::from_secs(2)));
+            }
+            Some(NervixClusterInitializationPhase::RemovingCredentials) => {
+                patch_status(
+                    &clusters,
+                    &cluster,
+                    ready_replicas,
+                    Some(NervixClusterInitializationPhase::Initialized),
+                )
+                .await?;
+                apply_stateful_set(
+                    &stateful_sets,
+                    &apply,
+                    manifests::stateful_set(&cluster, StatefulSetMode::Running),
+                )
+                .await?;
+                return Ok(Action::requeue(Duration::from_secs(2)));
+            }
+            Some(NervixClusterInitializationPhase::Initialized) | None => {}
+        }
+    }
+
+    patch_status(&clusters, &cluster, ready_replicas, initialization_phase).await?;
 
     Ok(Action::requeue(Duration::from_secs(30)))
 }
@@ -133,6 +173,88 @@ async fn apply_service(
         .patch(&service.name_any(), apply, &Patch::Apply(&service))
         .await?;
     Ok(())
+}
+
+async fn apply_stateful_set(
+    stateful_sets: &Api<StatefulSet>,
+    apply: &PatchParams,
+    stateful_set: StatefulSet,
+) -> Result<(), Error> {
+    stateful_sets
+        .patch(
+            &stateful_set.name_any(),
+            apply,
+            &Patch::Apply(&stateful_set),
+        )
+        .await?;
+    Ok(())
+}
+
+async fn patch_status(
+    clusters: &Api<NervixCluster>,
+    cluster: &NervixCluster,
+    ready_replicas: i32,
+    initialization_phase: Option<NervixClusterInitializationPhase>,
+) -> Result<(), Error> {
+    let status = manifests::status(cluster, ready_replicas, initialization_phase);
+    clusters
+        .patch_status(
+            &cluster.name_any(),
+            &PatchParams::default(),
+            &Patch::Merge(json!({ "status": status })),
+        )
+        .await?;
+    Ok(())
+}
+
+fn initialization_phase(cluster: &NervixCluster) -> Option<NervixClusterInitializationPhase> {
+    match cluster
+        .status
+        .as_ref()
+        .and_then(|status| status.initialization_phase)
+    {
+        Some(NervixClusterInitializationPhase::RemovingCredentials) => {
+            Some(NervixClusterInitializationPhase::RemovingCredentials)
+        }
+        Some(NervixClusterInitializationPhase::Initialized) => {
+            Some(NervixClusterInitializationPhase::Initialized)
+        }
+        Some(NervixClusterInitializationPhase::Initializing) | None
+            if cluster
+                .spec
+                .initial_default_user_password_secret_ref
+                .is_some() =>
+        {
+            Some(NervixClusterInitializationPhase::Initializing)
+        }
+        Some(NervixClusterInitializationPhase::Initializing) | None => None,
+    }
+}
+
+fn stateful_set_mode(
+    initialization_phase: Option<NervixClusterInitializationPhase>,
+) -> StatefulSetMode {
+    match initialization_phase {
+        Some(NervixClusterInitializationPhase::Initializing) => StatefulSetMode::Initializing,
+        Some(NervixClusterInitializationPhase::RemovingCredentials) => {
+            StatefulSetMode::RemovingCredentials
+        }
+        Some(NervixClusterInitializationPhase::Initialized) | None => StatefulSetMode::Running,
+    }
+}
+
+fn stateful_set_rollout_complete(stateful_set: &StatefulSet, desired_replicas: i32) -> bool {
+    let Some(status) = &stateful_set.status else {
+        return false;
+    };
+    let generation = stateful_set.metadata.generation.unwrap_or_default();
+
+    status.observed_generation.unwrap_or_default() >= generation
+        && status.replicas == desired_replicas
+        && status.ready_replicas == Some(desired_replicas)
+        && status.updated_replicas == Some(desired_replicas)
+        && status.current_revision.is_some()
+        && status.current_revision == status.update_revision
 }
 
 async fn delete_service_if_exists(services: &Api<Service>, name: &str) -> Result<(), Error> {
@@ -162,4 +284,101 @@ async fn prune_local_services(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use k8s_openapi::{
+        api::apps::v1::StatefulSetStatus, apimachinery::pkg::apis::meta::v1::ObjectMeta,
+    };
+
+    use crate::api::{NervixClusterSpec, NervixClusterStatus, SecretKeyRef};
+
+    use super::*;
+
+    #[test]
+    fn initialization_phase_starts_only_when_a_password_secret_is_configured() {
+        let mut cluster = cluster();
+        assert_eq!(initialization_phase(&cluster), None);
+        assert_eq!(
+            stateful_set_mode(initialization_phase(&cluster)),
+            StatefulSetMode::Running
+        );
+
+        cluster.spec.initial_default_user_password_secret_ref = Some(SecretKeyRef {
+            name: "nervix-initial-password".to_string(),
+            key: "password".to_string(),
+        });
+        assert_eq!(
+            initialization_phase(&cluster),
+            Some(NervixClusterInitializationPhase::Initializing)
+        );
+        assert_eq!(
+            stateful_set_mode(initialization_phase(&cluster)),
+            StatefulSetMode::Initializing
+        );
+    }
+
+    #[test]
+    fn credential_removal_continues_if_the_secret_reference_is_removed() {
+        let mut cluster = cluster();
+        cluster.status = Some(NervixClusterStatus {
+            initialization_phase: Some(NervixClusterInitializationPhase::RemovingCredentials),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            initialization_phase(&cluster),
+            Some(NervixClusterInitializationPhase::RemovingCredentials)
+        );
+        assert_eq!(
+            stateful_set_mode(initialization_phase(&cluster)),
+            StatefulSetMode::RemovingCredentials
+        );
+    }
+
+    #[test]
+    fn rollout_is_complete_only_after_the_new_ready_revision_is_observed() {
+        let mut stateful_set = StatefulSet {
+            metadata: ObjectMeta {
+                generation: Some(4),
+                ..Default::default()
+            },
+            status: Some(StatefulSetStatus {
+                observed_generation: Some(4),
+                replicas: 1,
+                ready_replicas: Some(1),
+                updated_replicas: Some(1),
+                current_revision: Some("nervix-abc".to_string()),
+                update_revision: Some("nervix-abc".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert!(stateful_set_rollout_complete(&stateful_set, 1));
+
+        stateful_set.status.as_mut().unwrap().update_revision = Some("nervix-def".to_string());
+        assert!(!stateful_set_rollout_complete(&stateful_set, 1));
+
+        stateful_set.status.as_mut().unwrap().update_revision = Some("nervix-abc".to_string());
+        stateful_set.status.as_mut().unwrap().observed_generation = Some(3);
+        assert!(!stateful_set_rollout_complete(&stateful_set, 1));
+    }
+
+    fn cluster() -> NervixCluster {
+        NervixCluster::new(
+            "nervix",
+            NervixClusterSpec {
+                image: "ghcr.io/nervix-io/nervix:test".to_string(),
+                replicas: 3,
+                cluster_id: None,
+                initial_default_user_password_secret_ref: None,
+                storage: "5Gi".to_string(),
+                log_filter: None,
+                local_access: None,
+                resources: Default::default(),
+            },
+        )
+    }
 }
