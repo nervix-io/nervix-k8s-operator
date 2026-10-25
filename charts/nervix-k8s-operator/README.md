@@ -2,24 +2,14 @@
 
 ## Install From Git
 
-Helm does not install charts from a plain Git repository by default. Install
-the `helm-git` downloader plugin first:
+The chart is distributed in the operator repository rather than as a versioned
+chart release. Clone the repository and install its bundled chart:
 
 ```sh
-helm plugin install https://github.com/aslafy-z/helm-git --version 1.4.1
-```
+git clone --depth 1 https://github.com/nervix-io/nervix-k8s-operator.git
 
-Add the Git-backed chart repository:
-
-```sh
-helm repo add nervix git+https://github.com/nervix-io/helm-charts@charts?ref=main
-helm repo update
-```
-
-Install the operator:
-
-```sh
-helm upgrade --install nervix-k8s-operator nervix/nervix-k8s-operator \
+helm upgrade --install nervix-k8s-operator \
+  ./nervix-k8s-operator/charts/nervix-k8s-operator \
   --namespace nervix-system \
   --create-namespace
 ```
@@ -47,4 +37,6 @@ authentication, restarts that pod without the credential, and only then scales
 the StatefulSet to the requested replica count.
 
 The chart installs the `NervixCluster` CRD from `crds/` and deploys the
-cluster-wide operator RBAC by default.
+cluster-wide operator RBAC by default. That RBAC lets the operator get, create
+and patch Secrets, which hold each cluster's interconnect CA and its nodes'
+interconnect certificates.

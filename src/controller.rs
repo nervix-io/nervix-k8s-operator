@@ -1,18 +1,23 @@
 use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
 use futures::StreamExt;
-use k8s_openapi::api::{apps::v1::StatefulSet, core::v1::Service};
+use k8s_openapi::api::{
+    apps::v1::StatefulSet,
+    core::v1::{Secret, Service},
+};
 use kube::{
     Api, Client, ResourceExt,
-    api::{ListParams, Patch, PatchParams},
+    api::{ListParams, Patch, PatchParams, PostParams},
     runtime::{Controller, controller::Action, watcher::Config},
 };
 use serde_json::json;
 use thiserror::Error;
+use time::OffsetDateTime;
 use tracing::{error, info, instrument};
 
 use crate::{
     api::{NervixCluster, NervixClusterInitializationPhase},
+    interconnect_tls::{self, ClusterAuthority, CredentialsError},
     manifests::{self, StatefulSetMode},
 };
 
@@ -25,6 +30,8 @@ struct Context {
 pub enum Error {
     #[error("missing namespace for NervixCluster {0}")]
     MissingNamespace(String),
+    #[error(transparent)]
+    Credentials(#[from] CredentialsError),
     #[error(transparent)]
     Kube(#[from] kube::Error),
 }
@@ -61,6 +68,7 @@ async fn reconcile(cluster: Arc<NervixCluster>, context: Arc<Context>) -> Result
         .ok_or_else(|| Error::MissingNamespace(cluster.name_any()))?;
     let client = context.client.clone();
     let services = Api::<Service>::namespaced(client.clone(), &namespace);
+    let secrets = Api::<Secret>::namespaced(client.clone(), &namespace);
     let stateful_sets = Api::<StatefulSet>::namespaced(client.clone(), &namespace);
     let clusters = Api::<NervixCluster>::namespaced(client, &namespace);
     let apply = PatchParams::apply("nervix-k8s-operator").force();
@@ -95,6 +103,22 @@ async fn reconcile(cluster: Arc<NervixCluster>, context: Arc<Context>) -> Result
     } else {
         prune_local_services(&services, &cluster, &BTreeSet::new()).await?;
     }
+
+    // Every pod mounts the credentials Secret, so it holds a certificate for every node before
+    // the StatefulSet runs one.
+    let authority = cluster_authority(&secrets, &cluster).await?;
+    let current_credentials = secrets
+        .get_opt(&interconnect_tls::credentials_secret_name(&cluster))
+        .await?;
+    let credentials = authority.credentials_secret(
+        &cluster,
+        &namespace,
+        current_credentials.as_ref(),
+        OffsetDateTime::now_utc(),
+    )?;
+    secrets
+        .patch(&credentials.name_any(), &apply, &Patch::Apply(&credentials))
+        .await?;
 
     let initialization_phase = initialization_phase(&cluster);
     let stateful_set_mode = stateful_set_mode(initialization_phase);
@@ -162,6 +186,31 @@ async fn reconcile(cluster: Arc<NervixCluster>, context: Arc<Context>) -> Result
 fn error_policy(_cluster: Arc<NervixCluster>, error: &Error, _context: Arc<Context>) -> Action {
     error!(%error, "scheduling retry after reconcile error");
     Action::requeue(Duration::from_secs(10))
+}
+
+/// The CA of `cluster`, generated and stored the first time the cluster is reconciled.
+async fn cluster_authority(
+    secrets: &Api<Secret>,
+    cluster: &NervixCluster,
+) -> Result<ClusterAuthority, Error> {
+    let name = interconnect_tls::authority_secret_name(cluster);
+    if let Some(secret) = secrets.get_opt(&name).await? {
+        return Ok(ClusterAuthority::from_secret(&secret)?);
+    }
+
+    let authority = ClusterAuthority::generate(OffsetDateTime::now_utc())?;
+    match secrets
+        .create(&PostParams::default(), &authority.secret(cluster))
+        .await
+    {
+        Ok(_) => Ok(authority),
+        // Another reconcile stored a CA first; every node must trust that one.
+        Err(kube::Error::Api(error)) if error.code == 409 => {
+            let secret = secrets.get(&name).await?;
+            Ok(ClusterAuthority::from_secret(&secret)?)
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 async fn apply_service(
@@ -374,7 +423,7 @@ mod tests {
                 replicas: 3,
                 cluster_id: None,
                 initial_default_user_password_secret_ref: None,
-                storage: "5Gi".to_string(),
+                storage: "20Gi".to_string(),
                 log_filter: None,
                 local_access: None,
                 resources: Default::default(),

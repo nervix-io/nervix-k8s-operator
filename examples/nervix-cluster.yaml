@@ -24,7 +24,7 @@ spec:
   initialDefaultUserPasswordSecretRef:
     name: nervix-initial-password
     key: password
-  storage: 5Gi
+  storage: 20Gi
   logFilter: info,nervix=info
   localAccess:
     enabled: true
@@ -37,4 +37,4 @@ spec:
   resources:
     cpuRequest: 250m
     memoryRequest: 512Mi
-    memoryLimit: 2Gi
+    memoryLimit: 3Gi

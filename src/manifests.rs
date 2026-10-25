@@ -7,7 +7,8 @@ use k8s_openapi::{
             Container, ContainerPort, EnvVar, EnvVarSource, ExecAction, HTTPGetAction,
             ObjectFieldSelector, PersistentVolumeClaim, PersistentVolumeClaimSpec,
             PodSecurityContext, PodSpec, PodTemplateSpec, Probe, ResourceRequirements,
-            SecretKeySelector, SecurityContext, Service, ServicePort, ServiceSpec, VolumeMount,
+            SecretKeySelector, SecretVolumeSource, SecurityContext, Service, ServicePort,
+            ServiceSpec, Volume, VolumeMount,
         },
     },
     apimachinery::pkg::{
@@ -16,20 +17,31 @@ use k8s_openapi::{
 };
 use kube::{Resource, ResourceExt};
 
-use crate::api::{
-    LocalAccessSpec, NervixCluster, NervixClusterInitializationPhase, NervixClusterStatus,
-    NervixNodeStatus, SecretKeyRef,
+use crate::{
+    api::{
+        LocalAccessSpec, NervixCluster, NervixClusterInitializationPhase, NervixClusterStatus,
+        NervixNodeStatus, SecretKeyRef,
+    },
+    interconnect_tls,
 };
 
 const APP_NAME: &str = "nervix";
 const GRPC_PORT: i32 = 47391;
-const GOSSIP_PORT: i32 = 47392;
-const CLUSTER_API_PORT: i32 = 47393;
 const INTERCONNECT_PORT: i32 = 47395;
 const HTTP_PORT: i32 = 8080;
 const HTTPS_PORT: i32 = 8443;
 const OBSERVABILITY_PORT: i32 = 9090;
 const WEB_CONSOLE_PORT: i32 = 47420;
+/// SIGTERM starts a node's graceful shutdown, which its 50-second default shutdown timeout bounds,
+/// including the 30-second default drain timeout. The kubelet waits longer, so a node that cannot
+/// finish shutting down exits on its own before it is killed.
+const TERMINATION_GRACE_PERIOD_SECONDS: i64 = 60;
+/// A container that exits on an error without writing a termination message reports the tail of its
+/// log instead, so a node's startup refusal appears in its pod's status.
+const TERMINATION_MESSAGE_POLICY: &str = "FallbackToLogsOnError";
+const INTERCONNECT_TLS_VOLUME: &str = "interconnect-tls";
+/// Read access for the pod's group, which `fs_group` makes the Nervix user's.
+const INTERCONNECT_TLS_MODE: i32 = 0o440;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum StatefulSetMode {
@@ -51,8 +63,6 @@ pub fn headless_service(cluster: &NervixCluster) -> Service {
             selector: Some(selector_labels(cluster)),
             ports: Some(vec![
                 service_port("grpc", GRPC_PORT),
-                service_port("gossip", GOSSIP_PORT).with_protocol("UDP"),
-                service_port("cluster-api", CLUSTER_API_PORT),
                 service_port("interconnect", INTERCONNECT_PORT),
                 service_port("http", HTTP_PORT),
                 service_port("https", HTTPS_PORT),
@@ -77,7 +87,6 @@ pub fn cluster_service(cluster: &NervixCluster) -> Service {
             selector: Some(selector_labels(cluster)),
             ports: Some(vec![
                 service_port("grpc", GRPC_PORT),
-                service_port("cluster-api", CLUSTER_API_PORT),
                 service_port("interconnect", INTERCONNECT_PORT),
                 service_port("http", HTTP_PORT),
                 service_port("https", HTTPS_PORT),
@@ -191,8 +200,17 @@ pub fn stateful_set(cluster: &NervixCluster, mode: StatefulSetMode) -> StatefulS
                         fs_group_change_policy: Some("OnRootMismatch".to_string()),
                         ..Default::default()
                     }),
-                    termination_grace_period_seconds: Some(30),
+                    termination_grace_period_seconds: Some(TERMINATION_GRACE_PERIOD_SECONDS),
                     containers: vec![container(cluster, mode)],
+                    volumes: Some(vec![Volume {
+                        name: INTERCONNECT_TLS_VOLUME.to_string(),
+                        secret: Some(SecretVolumeSource {
+                            secret_name: Some(interconnect_tls::credentials_secret_name(cluster)),
+                            default_mode: Some(INTERCONNECT_TLS_MODE),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }]),
                     ..Default::default()
                 }),
             },
@@ -239,11 +257,7 @@ pub fn status(
 
 fn node_status(namespace: &str, cluster: &NervixCluster, ordinal: i32) -> NervixNodeStatus {
     let pod = pod_name(cluster, ordinal);
-    let fqdn = format!(
-        "{pod}.{}.{}.svc.cluster.local",
-        headless_service_name(cluster),
-        namespace
-    );
+    let fqdn = pod_fqdn(namespace, cluster, ordinal);
     let grpc = if let Some(access) = enabled_local_access(cluster) {
         format!("$(HOST_IP):{}", access.first_node_grpc_node_port + ordinal)
     } else {
@@ -263,8 +277,6 @@ fn node_status(namespace: &str, cluster: &NervixCluster, ordinal: i32) -> Nervix
         ordinal,
         grpc_advertise_address: grpc,
         web_console_advertise_address: web_console,
-        cluster_advertise_address: format!("{fqdn}:{GOSSIP_PORT}"),
-        cluster_api_advertise_address: format!("{fqdn}:{CLUSTER_API_PORT}"),
         interconnect_advertise_address: format!("{fqdn}:{INTERCONNECT_PORT}"),
     }
 }
@@ -309,8 +321,6 @@ fn container(cluster: &NervixCluster, mode: StatefulSetMode) -> Container {
         env: Some(env),
         ports: Some(vec![
             container_port("grpc", GRPC_PORT, "TCP"),
-            container_port("gossip", GOSSIP_PORT, "UDP"),
-            container_port("cluster-api", CLUSTER_API_PORT, "TCP"),
             container_port("interconnect", INTERCONNECT_PORT, "TCP"),
             container_port("http", HTTP_PORT, "TCP"),
             container_port("https", HTTPS_PORT, "TCP"),
@@ -325,6 +335,7 @@ fn container(cluster: &NervixCluster, mode: StatefulSetMode) -> Container {
         }),
         liveness_probe: Some(http_probe("/livez", 10, 3)),
         startup_probe: Some(http_probe("/livez", 5, 24)),
+        termination_message_policy: Some(TERMINATION_MESSAGE_POLICY.to_string()),
         resources: Some(ResourceRequirements {
             requests: Some(quantity_map([
                 ("cpu", &spec.resources.cpu_request),
@@ -333,11 +344,19 @@ fn container(cluster: &NervixCluster, mode: StatefulSetMode) -> Container {
             limits: Some(quantity_map([("memory", &spec.resources.memory_limit)])),
             ..Default::default()
         }),
-        volume_mounts: Some(vec![VolumeMount {
-            name: "data".to_string(),
-            mount_path: "/var/lib/nervix".to_string(),
-            ..Default::default()
-        }]),
+        volume_mounts: Some(vec![
+            VolumeMount {
+                name: "data".to_string(),
+                mount_path: "/var/lib/nervix".to_string(),
+                ..Default::default()
+            },
+            VolumeMount {
+                name: INTERCONNECT_TLS_VOLUME.to_string(),
+                mount_path: interconnect_tls::MOUNT_PATH.to_string(),
+                read_only: Some(true),
+                ..Default::default()
+            },
+        ]),
         ..Default::default()
     }
 }
@@ -364,6 +383,11 @@ fn startup_script(cluster: &NervixCluster) -> String {
         "\"${pod_fqdn}:47420\"".to_string()
     };
 
+    let tls_directory = interconnect_tls::MOUNT_PATH;
+    let ca_file = interconnect_tls::CA_FILE;
+    let certificate_suffix = interconnect_tls::CERTIFICATE_SUFFIX;
+    let private_key_suffix = interconnect_tls::PRIVATE_KEY_SUFFIX;
+
     format!(
         r#"ordinal="${{HOSTNAME##*-}}"
 node_number=$((ordinal + 1))
@@ -372,7 +396,7 @@ pod_fqdn="${{HOSTNAME}}.{headless}.${{POD_NAMESPACE}}.svc.cluster.local"
 if [ "${{ordinal}}" = "0" ]; then
   bootstrap_args="--allow-bootstrap"
 else
-  bootstrap_args="--cluster-bootstrap-host {name}-0.{headless}.${{POD_NAMESPACE}}.svc.cluster.local:47392"
+  bootstrap_args="--cluster-bootstrap-host {name}-0.{headless}.${{POD_NAMESPACE}}.svc.cluster.local:47395"
 fi
 
 exec /usr/local/bin/nervix-server \
@@ -386,14 +410,11 @@ exec /usr/local/bin/nervix-server \
   --web-console-advertise-addr {web_console_advertise} \
   --cluster-id {cluster_id} \
   --node-id "${{node_id}}" \
-  --cluster-listen-addr 0.0.0.0:47392 \
-  --cluster-advertise-addr "${{pod_fqdn}}:47392" \
-  --cluster-api-mode http \
-  --cluster-api-listen-addr 0.0.0.0:47393 \
-  --cluster-api-advertise-addr "${{pod_fqdn}}:47393" \
-  --interconnect-mode http \
   --interconnect-listen-addr 0.0.0.0:47395 \
   --interconnect-advertise-addr "${{pod_fqdn}}:47395" \
+  --interconnect-tls-ca {tls_directory}/{ca_file} \
+  --interconnect-tls-cert "{tls_directory}/${{node_id}}{certificate_suffix}" \
+  --interconnect-tls-key "{tls_directory}/${{node_id}}{private_key_suffix}" \
   --replica-count {replicas} \
   --db-path /var/lib/nervix/db \
   ${{bootstrap_args}}
@@ -409,7 +430,7 @@ fn enabled_local_access(cluster: &NervixCluster) -> Option<&LocalAccessSpec> {
         .filter(|access| access.enabled)
 }
 
-fn child_metadata(
+pub(crate) fn child_metadata(
     cluster: &NervixCluster,
     name: &str,
     labels: BTreeMap<String, String>,
@@ -430,7 +451,10 @@ fn selector_labels(cluster: &NervixCluster) -> BTreeMap<String, String> {
     labels
 }
 
-fn component_labels(cluster: &NervixCluster, component: &str) -> BTreeMap<String, String> {
+pub(crate) fn component_labels(
+    cluster: &NervixCluster,
+    component: &str,
+) -> BTreeMap<String, String> {
     let mut labels = BTreeMap::new();
     labels.insert("app.kubernetes.io/name".to_string(), APP_NAME.to_string());
     labels.insert("app.kubernetes.io/instance".to_string(), cluster.name_any());
@@ -452,17 +476,6 @@ fn service_port(name: &str, port: i32) -> ServicePort {
         target_port: Some(IntOrString::String(name.to_string())),
         protocol: Some("TCP".to_string()),
         ..Default::default()
-    }
-}
-
-trait ServicePortExt {
-    fn with_protocol(self, protocol: &str) -> Self;
-}
-
-impl ServicePortExt for ServicePort {
-    fn with_protocol(mut self, protocol: &str) -> Self {
-        self.protocol = Some(protocol.to_string());
-        self
     }
 }
 
@@ -566,6 +579,20 @@ fn pod_name(cluster: &NervixCluster, ordinal: i32) -> String {
     format!("{}-{ordinal}", cluster.name_any())
 }
 
+/// The node ID the startup script gives the pod with `ordinal`.
+pub(crate) fn node_id(ordinal: i32) -> String {
+    format!("node-{}", ordinal + 1)
+}
+
+/// The host name the pod with `ordinal` advertises, through the headless service.
+pub(crate) fn pod_fqdn(namespace: &str, cluster: &NervixCluster, ordinal: i32) -> String {
+    format!(
+        "{}.{}.{namespace}.svc.cluster.local",
+        pod_name(cluster, ordinal),
+        headless_service_name(cluster)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use kube::ResourceExt;
@@ -624,12 +651,127 @@ mod tests {
         let script = startup_script(&cluster());
 
         assert!(script.contains("--allow-bootstrap"));
-        assert!(script.contains("--cluster-bootstrap-host nervix-0.nervix-headless.${POD_NAMESPACE}.svc.cluster.local:47392"));
+        assert!(script.contains("--cluster-bootstrap-host nervix-0.nervix-headless.${POD_NAMESPACE}.svc.cluster.local:47395"));
         assert!(script.contains("--replica-count 3"));
         assert!(script.contains("--web-console-listen-addr 0.0.0.0:47420"));
         assert!(
             script.contains("--web-console-advertise-addr \"${HOST_IP}:$((31421 + ordinal))\"")
         );
+    }
+
+    #[test]
+    fn startup_script_passes_each_node_its_interconnect_credentials() {
+        let script = startup_script(&cluster());
+
+        assert!(script.contains("--interconnect-tls-ca /etc/nervix/interconnect/ca.pem"));
+        assert!(
+            script.contains("--interconnect-tls-cert \"/etc/nervix/interconnect/${node_id}.crt\"")
+        );
+        assert!(
+            script.contains("--interconnect-tls-key \"/etc/nervix/interconnect/${node_id}.key\"")
+        );
+        assert!(script.contains("--interconnect-advertise-addr \"${pod_fqdn}:47395\""));
+    }
+
+    #[test]
+    fn pods_mount_the_interconnect_credentials_read_only() {
+        let stateful_set = stateful_set(&cluster(), StatefulSetMode::Running);
+        let pod = stateful_set
+            .spec
+            .expect("stateful set spec exists")
+            .template
+            .spec
+            .expect("pod spec exists");
+
+        let volume = pod
+            .volumes
+            .as_ref()
+            .and_then(|volumes| {
+                volumes
+                    .iter()
+                    .find(|volume| volume.name == "interconnect-tls")
+            })
+            .expect("the pod has an interconnect TLS volume");
+        let secret = volume.secret.as_ref().expect("the volume is a Secret");
+        assert_eq!(
+            secret.secret_name.as_deref(),
+            Some("nervix-interconnect-tls")
+        );
+        assert_eq!(secret.default_mode, Some(0o440));
+        assert_eq!(secret.items, None);
+
+        let mount = pod.containers[0]
+            .volume_mounts
+            .as_ref()
+            .and_then(|mounts| mounts.iter().find(|mount| mount.name == "interconnect-tls"))
+            .expect("the container mounts the interconnect TLS volume");
+        assert_eq!(mount.mount_path, "/etc/nervix/interconnect");
+        assert_eq!(mount.read_only, Some(true));
+    }
+
+    #[test]
+    fn pods_outlast_the_default_shutdown_timeout_before_they_are_killed() {
+        let stateful_set = stateful_set(&cluster(), StatefulSetMode::Running);
+        let pod = stateful_set
+            .spec
+            .expect("stateful set spec exists")
+            .template
+            .spec
+            .expect("pod spec exists");
+
+        assert_eq!(pod.termination_grace_period_seconds, Some(60));
+    }
+
+    #[test]
+    fn a_node_that_exits_on_an_error_reports_its_log_tail_as_its_termination_message() {
+        let stateful_set = stateful_set(&cluster(), StatefulSetMode::Running);
+        let container = &stateful_set
+            .spec
+            .expect("stateful set spec exists")
+            .template
+            .spec
+            .expect("pod spec exists")
+            .containers[0];
+
+        assert_eq!(
+            container.termination_message_policy.as_deref(),
+            Some("FallbackToLogsOnError")
+        );
+    }
+
+    #[test]
+    fn default_pods_get_a_3gi_memory_limit_and_a_20gi_volume() {
+        let spec: NervixClusterSpec =
+            serde_json::from_value(serde_json::json!({ "image": "ghcr.io/nervix-io/nervix:test" }))
+                .expect("a spec with only an image deserializes");
+        let stateful_set = stateful_set(
+            &NervixCluster::new("nervix", spec),
+            StatefulSetMode::Running,
+        );
+        let spec = stateful_set.spec.expect("stateful set spec exists");
+
+        let resources = spec.template.spec.expect("pod spec exists").containers[0]
+            .resources
+            .clone()
+            .expect("the container has resources");
+        assert_eq!(
+            resources.limits.expect("limits exist")["memory"],
+            Quantity("3Gi".to_string())
+        );
+        assert_eq!(
+            resources.requests.expect("requests exist")["memory"],
+            Quantity("512Mi".to_string())
+        );
+
+        let claim = &spec.volume_claim_templates.expect("claim templates exist")[0];
+        let storage = claim
+            .spec
+            .as_ref()
+            .and_then(|spec| spec.resources.as_ref())
+            .and_then(|resources| resources.requests.as_ref())
+            .and_then(|requests| requests.get("storage"))
+            .expect("the claim requests storage");
+        assert_eq!(storage, &Quantity("20Gi".to_string()));
     }
 
     #[test]
@@ -722,7 +864,7 @@ mod tests {
                     name: "nervix-initial-password".to_string(),
                     key: "password".to_string(),
                 }),
-                storage: "5Gi".to_string(),
+                storage: "20Gi".to_string(),
                 log_filter: None,
                 local_access: Some(LocalAccessSpec {
                     enabled: true,

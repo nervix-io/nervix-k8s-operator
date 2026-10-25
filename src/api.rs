@@ -26,6 +26,8 @@ pub struct NervixClusterSpec {
     /// Secret key used only while initializing the default user on a new cluster.
     #[serde(default)]
     pub initial_default_user_password_secret_ref: Option<SecretKeyRef>,
+    /// Size of each node's data volume.
+    /// A node refuses to start on a volume smaller than any of its storage quotas.
     #[serde(default = "default_storage")]
     pub storage: String,
     #[serde(default)]
@@ -71,6 +73,8 @@ pub struct ResourceSpec {
     pub cpu_request: String,
     #[serde(default = "default_memory_request")]
     pub memory_request: String,
+    /// Memory limit of each node's container.
+    /// A node refuses to start when its memory limit cannot hold its memory budgets.
     #[serde(default = "default_memory_limit")]
     pub memory_limit: String,
 }
@@ -114,8 +118,6 @@ pub struct NervixNodeStatus {
     pub ordinal: i32,
     pub grpc_advertise_address: String,
     pub web_console_advertise_address: String,
-    pub cluster_advertise_address: String,
-    pub cluster_api_advertise_address: String,
     pub interconnect_advertise_address: String,
 }
 
@@ -138,7 +140,7 @@ fn default_true() -> bool {
 }
 
 fn default_storage() -> String {
-    "5Gi".to_string()
+    "20Gi".to_string()
 }
 
 fn default_cpu_request() -> String {
@@ -150,7 +152,7 @@ fn default_memory_request() -> String {
 }
 
 fn default_memory_limit() -> String {
-    "2Gi".to_string()
+    "3Gi".to_string()
 }
 
 fn default_bootstrap_grpc_node_port() -> i32 {
@@ -179,7 +181,47 @@ fn default_first_node_observability_node_port() -> i32 {
 
 #[cfg(test)]
 mod tests {
+    use kube::CustomResourceExt;
+
     use super::*;
+
+    #[test]
+    fn checked_in_crds_match_the_generated_crd() {
+        let generated = serde_json::to_value(NervixCluster::crd()).expect("the CRD serializes");
+        for (path, checked_in) in [
+            ("deploy/crd.yaml", include_str!("../deploy/crd.yaml")),
+            (
+                "charts/nervix-k8s-operator/crds/nervixclusters.nervix.io.yaml",
+                include_str!("../charts/nervix-k8s-operator/crds/nervixclusters.nervix.io.yaml"),
+            ),
+        ] {
+            let checked_in: serde_json::Value =
+                serde_yaml::from_str(checked_in).expect("the checked-in CRD parses");
+            assert_eq!(
+                checked_in, generated,
+                "{path} differs from `cargo run -- crd`"
+            );
+        }
+    }
+
+    #[test]
+    fn the_example_spells_out_the_default_storage_and_resources() {
+        let defaults: NervixClusterSpec =
+            serde_json::from_value(serde_json::json!({ "image": "ghcr.io/nervix-io/nervix:test" }))
+                .expect("a spec with only an image deserializes");
+        let example =
+            serde_yaml::Deserializer::from_str(include_str!("../examples/nervix-cluster.yaml"))
+                .map(|document| {
+                    serde_yaml::Value::deserialize(document).expect("the document parses")
+                })
+                .find(|document| document["kind"] == "NervixCluster")
+                .expect("the example creates a NervixCluster");
+        let spec: NervixClusterSpec =
+            serde_yaml::from_value(example["spec"].clone()).expect("the example spec parses");
+
+        assert_eq!(spec.storage, defaults.storage);
+        assert_eq!(spec.resources, defaults.resources);
+    }
 
     #[test]
     fn absent_initialization_phase_serializes_as_null_for_merge_patch_clearing() {
