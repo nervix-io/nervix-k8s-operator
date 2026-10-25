@@ -90,21 +90,27 @@ spec:
               resources:
                 default:
                   cpuRequest: 250m
-                  memoryLimit: 2Gi
+                  memoryLimit: 3Gi
                   memoryRequest: 512Mi
                 properties:
                   cpuRequest:
                     default: 250m
                     type: string
                   memoryLimit:
-                    default: 2Gi
+                    default: 3Gi
+                    description: |-
+                      Memory limit of each node's container.
+                      A node refuses to start when its memory limit cannot hold its memory budgets.
                     type: string
                   memoryRequest:
                     default: 512Mi
                     type: string
                 type: object
               storage:
-                default: 5Gi
+                default: 20Gi
+                description: |-
+                  Size of each node's data volume.
+                  A node refuses to start on a volume smaller than any of its storage quotas.
                 type: string
             required:
             - image
@@ -124,10 +130,6 @@ spec:
                 default: []
                 items:
                   properties:
-                    clusterAdvertiseAddress:
-                      type: string
-                    clusterApiAdvertiseAddress:
-                      type: string
                     grpcAdvertiseAddress:
                       type: string
                     interconnectAdvertiseAddress:
@@ -140,8 +142,6 @@ spec:
                     webConsoleAdvertiseAddress:
                       type: string
                   required:
-                  - clusterAdvertiseAddress
-                  - clusterApiAdvertiseAddress
                   - grpcAdvertiseAddress
                   - interconnectAdvertiseAddress
                   - name

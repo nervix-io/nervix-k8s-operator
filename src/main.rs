@@ -1,5 +1,6 @@
 mod api;
 mod controller;
+mod interconnect_tls;
 mod manifests;
 
 use clap::{Parser, Subcommand};

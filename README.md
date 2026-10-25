@@ -9,11 +9,12 @@ cluster. Each custom resource owns one Nervix application cluster and reconciles
 - a ClusterIP service for in-cluster clients
 - optional bootstrap and per-node NodePort services for gRPC and web console local access
 - one-time, Secret-backed initialization of the `default` user
+- the cluster's interconnect CA and a certificate for every node, in two Secrets
 - a StatefulSet with one PVC per Nervix node
 - status with desired/ready replica counts and per-node advertised addresses
 
-This mirrors the current static manifest shape in
-`/home/glebpom/personal/nervix/kube/resources/nervix.yaml`, but makes the cluster
+This mirrors the static manifest `kube/resources/nervix.yaml` in the
+[Nervix repository](https://github.com/nervix-io/nervix), but makes the cluster
 name, image, replica count, storage, resource requests, and NodePorts declarative.
 
 ## Local development
@@ -82,3 +83,38 @@ waits for the clean revision to become ready, and only then scales to
 Multiple Nervix clusters are controlled by creating multiple `NervixCluster`
 objects, usually in separate namespaces or with distinct names in the same
 namespace.
+
+## Node resources
+
+Each Nervix node checks its memory limit and its data volume before it starts,
+in its [startup preflight](https://docs.nervix.io/snapshot/capacity-planning.html#what-a-node-needs-to-start),
+and refuses to start when they cannot hold its configuration:
+
+- its memory limit must hold the node's memory budgets, about 2.3 GiB with the
+  default settings;
+- its data volume must be at least as large as each of its storage quotas,
+  16 GiB for extracted resources by default.
+
+The defaults meet both checks: `resources.memoryLimit` is `3Gi`, with a
+`resources.memoryRequest` of `512Mi`, and `storage` is `20Gi`. With a smaller
+memory limit or volume every pod exits, and its log names the check that refused
+it with the values involved.
+
+## Interconnect certificates
+
+Nervix nodes authenticate their node-to-node traffic with mutual TLS. For each
+`NervixCluster`, the operator generates a CA and keeps it in the Secret
+`<name>-interconnect-ca`, which only the operator reads. It issues every node a
+certificate signed by that CA into the Secret `<name>-interconnect-tls`, which
+the pods mount read-only. Each certificate names its node in the identity URI
+`nervix://cluster/<cluster-id>/node/node-<n>` and names the pod's host name in
+the headless service, which the node advertises to its peers. The operator's
+ClusterRole therefore lets it get, create and patch Secrets.
+
+A node certificate is valid for a year. The operator issues it again 30 days
+before it expires, or as soon as it no longer names its node or was signed by
+another CA, and nodes reload changed credentials without a restart. The CA is
+valid for ten years. Deleting `<name>-interconnect-ca` makes the operator
+generate a new CA and issue every node a new certificate. Until every node has
+reloaded its credentials, nodes that trust different CAs refuse each other's
+connections.
