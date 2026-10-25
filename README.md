@@ -97,8 +97,9 @@ and refuses to start when they cannot hold its configuration:
 
 The defaults meet both checks: `resources.memoryLimit` is `3Gi`, with a
 `resources.memoryRequest` of `512Mi`, and `storage` is `20Gi`. With a smaller
-memory limit or volume every pod exits, and its log names the check that refused
-it with the values involved.
+memory limit or volume every pod exits, and the refusal names the check and the
+values involved. It is the end of the pod's log, and `kubectl describe pod`
+shows it as the container's last termination message.
 
 ## Interconnect certificates
 

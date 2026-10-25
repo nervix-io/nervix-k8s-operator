@@ -36,6 +36,9 @@ const WEB_CONSOLE_PORT: i32 = 47420;
 /// including the 30-second default drain timeout. The kubelet waits longer, so a node that cannot
 /// finish shutting down exits on its own before it is killed.
 const TERMINATION_GRACE_PERIOD_SECONDS: i64 = 60;
+/// A container that exits on an error without writing a termination message reports the tail of its
+/// log instead, so a node's startup refusal appears in its pod's status.
+const TERMINATION_MESSAGE_POLICY: &str = "FallbackToLogsOnError";
 const INTERCONNECT_TLS_VOLUME: &str = "interconnect-tls";
 /// Read access for the pod's group, which `fs_group` makes the Nervix user's.
 const INTERCONNECT_TLS_MODE: i32 = 0o440;
@@ -332,6 +335,7 @@ fn container(cluster: &NervixCluster, mode: StatefulSetMode) -> Container {
         }),
         liveness_probe: Some(http_probe("/livez", 10, 3)),
         startup_probe: Some(http_probe("/livez", 5, 24)),
+        termination_message_policy: Some(TERMINATION_MESSAGE_POLICY.to_string()),
         resources: Some(ResourceRequirements {
             requests: Some(quantity_map([
                 ("cpu", &spec.resources.cpu_request),
@@ -716,6 +720,23 @@ mod tests {
             .expect("pod spec exists");
 
         assert_eq!(pod.termination_grace_period_seconds, Some(60));
+    }
+
+    #[test]
+    fn a_node_that_exits_on_an_error_reports_its_log_tail_as_its_termination_message() {
+        let stateful_set = stateful_set(&cluster(), StatefulSetMode::Running);
+        let container = &stateful_set
+            .spec
+            .expect("stateful set spec exists")
+            .template
+            .spec
+            .expect("pod spec exists")
+            .containers[0];
+
+        assert_eq!(
+            container.termination_message_policy.as_deref(),
+            Some("FallbackToLogsOnError")
+        );
     }
 
     #[test]
