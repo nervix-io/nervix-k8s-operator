@@ -33,10 +33,22 @@ spec:
 ```
 
 The operator exposes that Secret to a single bootstrap pod, verifies the user by
-authentication, restarts that pod without the credential, and only then scales
-the StatefulSet to the requested replica count.
+authentication, commits the cluster parameters requested in
+`spec.initialClusterParameters`, restarts that pod without the credential, and
+only then scales the StatefulSet to the requested replica count. No pod receives
+a cluster parameter as a startup option; change a running cluster's parameters
+with `ALTER CLUSTER SET`.
 
 The chart installs the `NervixCluster` CRD from `crds/` and deploys the
-cluster-wide operator RBAC by default. That RBAC lets the operator get, create
-and patch Secrets, which hold each cluster's interconnect CA and its nodes'
-interconnect certificates.
+cluster-wide operator RBAC by default. Helm installs a chart's CRDs only on its
+first install, so after upgrading to a chart whose CRD changed, apply it
+yourself, or the API server drops the fields it does not know:
+
+```sh
+kubectl apply -f ./nervix-k8s-operator/charts/nervix-k8s-operator/crds/nervixclusters.nervix.io.yaml
+```
+
+The chart's RBAC lets the operator get, create and patch Secrets, which hold
+each cluster's interconnect CA and its nodes' interconnect certificates, and
+exec into pods, which it does to commit a new cluster's initial parameters
+through the bootstrap pod's `nervix-cli`.

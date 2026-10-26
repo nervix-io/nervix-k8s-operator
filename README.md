@@ -9,6 +9,7 @@ cluster. Each custom resource owns one Nervix application cluster and reconciles
 - a ClusterIP service for in-cluster clients
 - optional bootstrap and per-node NodePort services for gRPC and web console local access
 - one-time, Secret-backed initialization of the `default` user
+- one-time commitment of the cluster parameters a new cluster requests
 - the cluster's interconnect CA and a certificate for every node, in two Secrets
 - a StatefulSet with one PVC per Nervix node
 - status with desired/ready replica counts and per-node advertised addresses
@@ -75,7 +76,8 @@ cluster. The example manifest includes a development Secret whose password is
 For a new cluster with `initialDefaultUserPasswordSecretRef`, the operator
 starts only pod 0 with `NERVIX_INIT_DEFAULT_USER_PASSWORD`. A bootstrap-only
 readiness probe authenticates with that password, proving that Nervix committed
-the `default` user. The operator then restarts pod 0 without the password,
+the `default` user. The operator then commits the requested
+[cluster parameters](#cluster-parameters), restarts pod 0 without the password,
 waits for the clean revision to become ready, and only then scales to
 `spec.replicas`. The initialization phase is exposed as
 `status.initializationPhase`.
@@ -83,6 +85,65 @@ waits for the clean revision to become ready, and only then scales to
 Multiple Nervix clusters are controlled by creating multiple `NervixCluster`
 objects, usually in separate namespaces or with distinct names in the same
 namespace.
+
+## Cluster parameters
+
+A Nervix cluster commits its cluster parameters, such as `REPLICA_COUNT`, once
+through Raft, and every node reads them from that record. Options that seed them
+are accepted only on the first start of a new cluster, every later start refuses
+them, and `ALTER CLUSTER SET` changes them. The operator therefore starts every
+pod, pod 0 included, without a cluster parameter option. Restarting a pod,
+recreating it on its persistent volume, rolling the StatefulSet and scaling it
+change no parameter.
+
+Request the parameters a new cluster starts with in
+`spec.initialClusterParameters`:
+
+```yaml
+spec:
+  initialDefaultUserPasswordSecretRef:
+    name: nervix-initial-password
+    key: password
+  initialClusterParameters:
+    replicaCount: 2
+```
+
+`replicaCount` is `REPLICA_COUNT`: how many nodes besides its owner hold a
+replica of each piece of runtime state. A parameter the request leaves out
+keeps the server's default.
+
+The bootstrap node commits the server's defaults when it creates the cluster.
+Once pod 0 accepts the initial password, and before the operator removes it,
+the operator reads the committed values with `DESCRIBE CLUSTER` through pod 0's
+`nervix-cli` and commits every requested value that differs with one
+`ALTER CLUSTER SET`. The committed values decide the outcome, so an
+initialization that resumes after pod 0 or the operator restarted commits each
+requested value once. Until the values are committed, the cluster stays
+initializing and the operator tries again every 10 seconds. The operator
+records what it committed in `status.initialClusterParameters`, and the
+`InitialClusterParametersCommitted` condition reports on the request:
+
+| Reason | Status | Meaning |
+| --- | --- | --- |
+| `Pending` | `False` | The cluster is initializing; the operator commits the request once pod 0 accepts the initial password. |
+| `Uncommitted` | `False` | The latest attempt left a value uncommitted, for the reason in the message. The operator tries again while the cluster initializes. |
+| `Committed` | `True` | The operator committed the request while the cluster initialized. |
+| `ChangedAfterInitialization` | `False` | The request differs from what the operator committed. The operator changes no parameter of an initialized cluster. |
+| `InitializationNotRequested` | `False` | The cluster has no `initialDefaultUserPasswordSecretRef`, so the operator does not initialize it and commits nothing. |
+
+Change a running cluster's parameters with `ALTER CLUSTER SET`, for example
+through the bootstrap NodePort, and read them with `DESCRIBE CLUSTER`, which
+reports the committed values and each node's running values:
+
+```sh
+nervix-cli --server http://<node-address>:31390 \
+  --command 'ALTER CLUSTER SET REPLICA_COUNT = 1;'
+```
+
+Committing a request needs a Nervix server with `ALTER CLUSTER SET`. A server
+that refuses the statement leaves the cluster initializing, with the refusal in
+the condition. The operator runs `nervix-cli` in pod 0, so its ClusterRole lets
+it exec into pods.
 
 ## Node resources
 

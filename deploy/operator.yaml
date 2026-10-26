@@ -29,6 +29,11 @@ rules:
   - apiGroups: ["apps"]
     resources: ["statefulsets"]
     verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  # Commits the initial cluster parameters with the bootstrap pod's nervix-cli while a cluster
+  # initializes. A WebSocket exec is authorized as get, or as create where Kubernetes requires it.
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["get", "create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

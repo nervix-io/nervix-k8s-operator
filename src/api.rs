@@ -1,3 +1,4 @@
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -26,6 +27,12 @@ pub struct NervixClusterSpec {
     /// Secret key used only while initializing the default user on a new cluster.
     #[serde(default)]
     pub initial_default_user_password_secret_ref: Option<SecretKeyRef>,
+    /// Cluster parameters the operator commits once, with `ALTER CLUSTER SET`, while it
+    /// initializes a new cluster, which needs `initialDefaultUserPasswordSecretRef`.
+    /// Nodes never receive cluster parameters as startup options: every start uses the cluster's
+    /// committed parameters, and only `ALTER CLUSTER SET` changes them afterwards.
+    #[serde(default)]
+    pub initial_cluster_parameters: ClusterParameters,
     /// Size of each node's data volume.
     /// A node refuses to start on a volume smaller than any of its storage quotas.
     #[serde(default = "default_storage")]
@@ -45,6 +52,17 @@ pub struct SecretKeyRef {
     pub name: String,
     /// Key containing the initial password.
     pub key: String,
+}
+
+/// Nervix cluster parameters, each named as `ALTER CLUSTER SET` names it.
+#[derive(Clone, Debug, Default, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClusterParameters {
+    /// `REPLICA_COUNT`: how many nodes besides its owner hold a replica of each piece of
+    /// runtime state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0))]
+    pub replica_count: Option<i32>,
 }
 
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
@@ -95,12 +113,17 @@ pub struct NervixClusterStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observed_generation: Option<i64>,
     pub initialization_phase: Option<NervixClusterInitializationPhase>,
+    /// The cluster parameters the operator committed while it initialized the cluster, empty when
+    /// it was asked for none. Absent when the operator did not initialize the cluster.
+    pub initial_cluster_parameters: Option<ClusterParameters>,
     #[serde(default)]
     pub ready_replicas: i32,
     #[serde(default)]
     pub replicas: i32,
     #[serde(default)]
     pub nodes: Vec<NervixNodeStatus>,
+    #[serde(default)]
+    pub conditions: Vec<Condition>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
