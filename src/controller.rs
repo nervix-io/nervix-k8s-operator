@@ -1,9 +1,13 @@
 use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
 use futures::StreamExt;
-use k8s_openapi::api::{
-    apps::v1::StatefulSet,
-    core::v1::{Secret, Service},
+use k8s_openapi::{
+    api::{
+        apps::v1::StatefulSet,
+        core::v1::{Pod, Secret, Service},
+    },
+    apimachinery::pkg::apis::meta::v1::Time,
+    jiff::Timestamp,
 };
 use kube::{
     Api, Client, ResourceExt,
@@ -13,13 +17,18 @@ use kube::{
 use serde_json::json;
 use thiserror::Error;
 use time::OffsetDateTime;
-use tracing::{error, info, instrument};
+use tracing::{error, info, instrument, warn};
 
 use crate::{
-    api::{NervixCluster, NervixClusterInitializationPhase},
+    api::{ClusterParameters, NervixCluster, NervixClusterInitializationPhase},
+    initial_parameters::{self, BootstrapPodCli, Commitment},
     interconnect_tls::{self, ClusterAuthority, CredentialsError},
     manifests::{self, StatefulSetMode},
 };
+
+/// How soon the operator tries again to commit the initial cluster parameters after an attempt
+/// left them uncommitted.
+const UNCOMMITTED_PARAMETERS_RETRY: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 struct Context {
@@ -70,6 +79,7 @@ async fn reconcile(cluster: Arc<NervixCluster>, context: Arc<Context>) -> Result
     let services = Api::<Service>::namespaced(client.clone(), &namespace);
     let secrets = Api::<Secret>::namespaced(client.clone(), &namespace);
     let stateful_sets = Api::<StatefulSet>::namespaced(client.clone(), &namespace);
+    let pods = Api::<Pod>::namespaced(client.clone(), &namespace);
     let clusters = Api::<NervixCluster>::namespaced(client, &namespace);
     let apply = PatchParams::apply("nervix-k8s-operator").force();
 
@@ -121,6 +131,10 @@ async fn reconcile(cluster: Arc<NervixCluster>, context: Arc<Context>) -> Result
         .await?;
 
     let initialization_phase = initialization_phase(&cluster);
+    let committed_parameters = cluster
+        .status
+        .as_ref()
+        .and_then(|status| status.initial_cluster_parameters.clone());
     let stateful_set_mode = stateful_set_mode(initialization_phase);
     let stateful_set = manifests::stateful_set(&cluster, stateful_set_mode);
     let stateful_set_name = stateful_set.name_any();
@@ -143,11 +157,35 @@ async fn reconcile(cluster: Arc<NervixCluster>, context: Arc<Context>) -> Result
     if stateful_set_rollout_complete(&observed_stateful_set, desired_stateful_set_replicas) {
         match initialization_phase {
             Some(NervixClusterInitializationPhase::Initializing) => {
+                // The bootstrap pod is ready, so it accepted the initial credential, which it holds
+                // until the credential is removed: commit the requested parameters before that.
+                let requested = &cluster.spec.initial_cluster_parameters;
+                let cli = BootstrapPodCli::new(pods, manifests::pod_name(&cluster, 0));
+                let commitment = initial_parameters::commit(&cli, &requested.assignments()).await;
+                if let Commitment::Uncommitted { reason } = commitment {
+                    warn!(%reason, "the initial cluster parameters are not committed yet");
+                    patch_status(
+                        &clusters,
+                        &cluster,
+                        ready_replicas,
+                        Initialization {
+                            phase: Some(NervixClusterInitializationPhase::Initializing),
+                            committed_parameters,
+                            uncommitted_reason: Some(&reason),
+                        },
+                    )
+                    .await?;
+                    return Ok(Action::requeue(UNCOMMITTED_PARAMETERS_RETRY));
+                }
                 patch_status(
                     &clusters,
                     &cluster,
                     ready_replicas,
-                    Some(NervixClusterInitializationPhase::RemovingCredentials),
+                    Initialization {
+                        phase: Some(NervixClusterInitializationPhase::RemovingCredentials),
+                        committed_parameters: Some(requested.clone()),
+                        uncommitted_reason: None,
+                    },
                 )
                 .await?;
                 apply_stateful_set(
@@ -163,7 +201,11 @@ async fn reconcile(cluster: Arc<NervixCluster>, context: Arc<Context>) -> Result
                     &clusters,
                     &cluster,
                     ready_replicas,
-                    Some(NervixClusterInitializationPhase::Initialized),
+                    Initialization {
+                        phase: Some(NervixClusterInitializationPhase::Initialized),
+                        committed_parameters,
+                        uncommitted_reason: None,
+                    },
                 )
                 .await?;
                 apply_stateful_set(
@@ -178,9 +220,28 @@ async fn reconcile(cluster: Arc<NervixCluster>, context: Arc<Context>) -> Result
         }
     }
 
-    patch_status(&clusters, &cluster, ready_replicas, initialization_phase).await?;
+    patch_status(
+        &clusters,
+        &cluster,
+        ready_replicas,
+        Initialization {
+            phase: initialization_phase,
+            committed_parameters,
+            uncommitted_reason: None,
+        },
+    )
+    .await?;
 
     Ok(Action::requeue(Duration::from_secs(30)))
+}
+
+/// What a status update reports about the cluster's initialization.
+struct Initialization<'a> {
+    phase: Option<NervixClusterInitializationPhase>,
+    /// The parameters the operator committed while it initialized the cluster.
+    committed_parameters: Option<ClusterParameters>,
+    /// Why this reconcile's attempt left the requested initial parameters uncommitted.
+    uncommitted_reason: Option<&'a str>,
 }
 
 fn error_policy(_cluster: Arc<NervixCluster>, error: &Error, _context: Arc<Context>) -> Action {
@@ -243,9 +304,31 @@ async fn patch_status(
     clusters: &Api<NervixCluster>,
     cluster: &NervixCluster,
     ready_replicas: i32,
-    initialization_phase: Option<NervixClusterInitializationPhase>,
+    initialization: Initialization<'_>,
 ) -> Result<(), Error> {
-    let status = manifests::status(cluster, ready_replicas, initialization_phase);
+    let state = initial_parameters::condition_state(
+        &cluster.spec.initial_cluster_parameters,
+        initialization.committed_parameters.as_ref(),
+        initialization.phase,
+        initialization.uncommitted_reason,
+    );
+    let previous_conditions = match &cluster.status {
+        Some(status) => status.conditions.as_slice(),
+        None => &[],
+    };
+    let conditions = initial_parameters::conditions(
+        previous_conditions,
+        state,
+        cluster.metadata.generation,
+        Time(Timestamp::now()),
+    );
+    let status = manifests::status(
+        cluster,
+        ready_replicas,
+        initialization.phase,
+        initialization.committed_parameters,
+        conditions,
+    );
     clusters
         .patch_status(
             &cluster.name_any(),
@@ -423,6 +506,7 @@ mod tests {
                 replicas: 3,
                 cluster_id: None,
                 initial_default_user_password_secret_ref: None,
+                initial_cluster_parameters: Default::default(),
                 storage: "20Gi".to_string(),
                 log_filter: None,
                 local_access: None,

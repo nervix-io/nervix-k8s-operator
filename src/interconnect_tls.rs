@@ -691,6 +691,7 @@ mod tests {
                 replicas,
                 cluster_id: cluster_id.map(str::to_string),
                 initial_default_user_password_secret_ref: None,
+                initial_cluster_parameters: Default::default(),
                 storage: "20Gi".to_string(),
                 log_filter: None,
                 local_access: None,

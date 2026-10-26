@@ -75,10 +75,10 @@ minikube-deploy profile="nervix-operator-test" tag=image_tag:
         --set image.tag="${tag}"
     kubectl --context "{{ profile }}" -n nervix-system rollout status deployment/nervix-k8s-operator --timeout=180s
 
-minikube-create-cluster profile="nervix-operator-test":
+minikube-create-cluster profile="nervix-operator-test" manifest="examples/nervix-cluster.yaml":
     #!/usr/bin/env bash
     set -euo pipefail
-    kubectl --context "{{ profile }}" apply -f examples/nervix-cluster.yaml
+    kubectl --context "{{ profile }}" apply -f "{{ manifest }}"
     deadline=$((SECONDS + 120))
     until kubectl --context "{{ profile }}" -n nervix get statefulset/nervix >/dev/null 2>&1; do
         if (( SECONDS >= deadline )); then
@@ -115,10 +115,21 @@ minikube-cli-check profile="nervix-operator-test" cli_bin="nervix-cli" password=
         sleep 5
     done
 
+# Create the cluster, stopping the operator and recreating pod 0 once it has created the Nervix
+# cluster, before the operator resumes the initialization.
+minikube-create-cluster-interrupted profile="nervix-operator-test" manifest="examples/nervix-cluster.yaml":
+    scripts/minikube-lifecycle.sh initialize-interrupted "{{ profile }}" "{{ manifest }}"
+
+# Restart, recreate, roll and scale the initialized cluster's pods, and change its requested
+# parameters, checking that every pod starts and the cluster keeps its committed parameters.
+minikube-lifecycle-check profile="nervix-operator-test" cli_bin="nervix-cli" password="nervix":
+    scripts/minikube-lifecycle.sh restarts "{{ profile }}" "{{ cli_bin }}" "{{ password }}"
+
 minikube-test profile="nervix-operator-test" tag=image_tag cli_bin="nervix-cli":
     just minikube-start "{{ profile }}"
     just docker-pull "{{ tag }}"
     just minikube-load-operator "{{ profile }}" "{{ tag }}"
     just minikube-deploy "{{ profile }}" "{{ tag }}"
-    just minikube-create-cluster "{{ profile }}"
+    just minikube-create-cluster-interrupted "{{ profile }}"
     just minikube-cli-check "{{ profile }}" "{{ cli_bin }}"
+    just minikube-lifecycle-check "{{ profile }}" "{{ cli_bin }}"

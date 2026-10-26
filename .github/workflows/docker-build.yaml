@@ -117,7 +117,7 @@ jobs:
     name: minikube
     needs: [meta, build]
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -173,12 +173,17 @@ jobs:
 
           just minikube-load-operator "${profile}" "${operator_image}"
           just minikube-deploy "${profile}" "${operator_image}"
-          just minikube-create-cluster "${profile}"
+          just minikube-create-cluster-interrupted "${profile}"
           just minikube-cli-check "${profile}" ./nervix-cli
+          just minikube-lifecycle-check "${profile}" ./nervix-cli
 
       - name: Dump minikube state
         if: always()
         run: |
-          kubectl --context nervix-operator-ci get nervixclusters -A || true
+          kubectl --context nervix-operator-ci get nervixclusters -A -o yaml || true
           kubectl --context nervix-operator-ci get pods,svc,statefulset,pvc -A || true
           kubectl --context nervix-operator-ci -n nervix-system logs deployment/nervix-k8s-operator --tail=200 || true
+          for pod in $(kubectl --context nervix-operator-ci -n nervix get pods -o name 2>/dev/null); do
+            kubectl --context nervix-operator-ci -n nervix logs "${pod}" --tail=200 || true
+            kubectl --context nervix-operator-ci -n nervix logs "${pod}" --previous --tail=200 || true
+          done

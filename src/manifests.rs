@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use k8s_openapi::{
     api::{
         apps::v1::{StatefulSet, StatefulSetSpec},
@@ -19,13 +20,21 @@ use kube::{Resource, ResourceExt};
 
 use crate::{
     api::{
-        LocalAccessSpec, NervixCluster, NervixClusterInitializationPhase, NervixClusterStatus,
-        NervixNodeStatus, SecretKeyRef,
+        ClusterParameters, LocalAccessSpec, NervixCluster, NervixClusterInitializationPhase,
+        NervixClusterStatus, NervixNodeStatus, SecretKeyRef,
     },
     interconnect_tls,
 };
 
 const APP_NAME: &str = "nervix";
+/// The container that runs Nervix in every node pod.
+pub(crate) const CONTAINER_NAME: &str = APP_NAME;
+const NERVIX_CLI: &str = "/usr/local/bin/nervix-cli";
+/// The session endpoint of the node in the same pod.
+const LOCAL_SESSION_ENDPOINT: &str = "http://127.0.0.1:47391";
+/// Holds the default user's initial password, only in the bootstrap pod and only while the
+/// cluster initializes.
+const INITIAL_PASSWORD_ENV: &str = "NERVIX_INIT_DEFAULT_USER_PASSWORD";
 const GRPC_PORT: i32 = 47391;
 const INTERCONNECT_PORT: i32 = 47395;
 const HTTP_PORT: i32 = 8080;
@@ -240,6 +249,8 @@ pub fn status(
     cluster: &NervixCluster,
     ready_replicas: i32,
     initialization_phase: Option<NervixClusterInitializationPhase>,
+    initial_cluster_parameters: Option<ClusterParameters>,
+    conditions: Vec<Condition>,
 ) -> NervixClusterStatus {
     let namespace = cluster.namespace().unwrap_or_else(|| "default".to_string());
     let replicas = cluster.spec.normalized_replicas();
@@ -247,11 +258,13 @@ pub fn status(
     NervixClusterStatus {
         observed_generation: cluster.metadata.generation,
         initialization_phase,
+        initial_cluster_parameters,
         ready_replicas,
         replicas,
         nodes: (0..replicas)
             .map(|ordinal| node_status(&namespace, cluster, ordinal))
             .collect(),
+        conditions,
     }
 }
 
@@ -299,11 +312,11 @@ fn container(cluster: &NervixCluster, mode: StatefulSetMode) -> Container {
     if mode == StatefulSetMode::Initializing
         && let Some(secret_ref) = &spec.initial_default_user_password_secret_ref
     {
-        env.push(secret_env("NERVIX_INIT_DEFAULT_USER_PASSWORD", secret_ref));
+        env.push(secret_env(INITIAL_PASSWORD_ENV, secret_ref));
     }
 
     Container {
-        name: APP_NAME.to_string(),
+        name: CONTAINER_NAME.to_string(),
         image: Some(spec.image.clone()),
         image_pull_policy: Some("IfNotPresent".to_string()),
         security_context: Some(SecurityContext {
@@ -361,10 +374,13 @@ fn container(cluster: &NervixCluster, mode: StatefulSetMode) -> Container {
     }
 }
 
+/// The command every node pod starts Nervix with. It passes no cluster parameter: options that seed
+/// cluster parameters are legal only on the first start of a new cluster, so every start of every
+/// pod, the bootstrap pod's included, uses the cluster's committed parameters. The operator commits
+/// the requested initial parameters while it initializes the cluster; see `initial_parameters`.
 fn startup_script(cluster: &NervixCluster) -> String {
     let name = cluster.name_any();
     let cluster_id = cluster.spec.resolved_cluster_id(&name);
-    let replicas = cluster.spec.normalized_replicas();
     let headless = headless_service_name(cluster);
     let grpc_advertise = if let Some(access) = enabled_local_access(cluster) {
         format!(
@@ -415,7 +431,6 @@ exec /usr/local/bin/nervix-server \
   --interconnect-tls-ca {tls_directory}/{ca_file} \
   --interconnect-tls-cert "{tls_directory}/${{node_id}}{certificate_suffix}" \
   --interconnect-tls-key "{tls_directory}/${{node_id}}{private_key_suffix}" \
-  --replica-count {replicas} \
   --db-path /var/lib/nervix/db \
   ${{bootstrap_args}}
 "#
@@ -530,17 +545,32 @@ fn initial_password_probe() -> Probe {
             command: Some(vec![
                 "/bin/sh".to_string(),
                 "-ec".to_string(),
-                "NERVIX_PASSWORD=\"${NERVIX_INIT_DEFAULT_USER_PASSWORD}\" \
-exec /usr/local/bin/nervix-cli \
---server http://127.0.0.1:47391 \
---command 'SHOW CLUSTER STATUS;' >/dev/null"
-                    .to_string(),
+                format!(
+                    "NERVIX_PASSWORD=\"${{{INITIAL_PASSWORD_ENV}}}\" exec {NERVIX_CLI} \
+                     --server {LOCAL_SESSION_ENDPOINT} --command 'SHOW CLUSTER STATUS;' >/dev/null"
+                ),
             ]),
         }),
         period_seconds: Some(5),
         failure_threshold: Some(24),
         ..Default::default()
     }
+}
+
+/// Runs `statement` once with the pod's `nervix-cli` against the node in the same pod,
+/// authenticated as the default user with the initial password that the bootstrap pod holds while
+/// the cluster initializes. The statement is the shell's first argument, never part of the script.
+pub(crate) fn initial_credential_cli_command(statement: &str) -> Vec<String> {
+    vec![
+        "/bin/sh".to_string(),
+        "-ec".to_string(),
+        format!(
+            "NERVIX_PASSWORD=\"${{{INITIAL_PASSWORD_ENV}}}\" exec {NERVIX_CLI} \
+             --server {LOCAL_SESSION_ENDPOINT} --command \"$1\""
+        ),
+        "nervix-cli".to_string(),
+        statement.to_string(),
+    ]
 }
 
 fn http_probe(path: &str, period_seconds: i32, failure_threshold: i32) -> Probe {
@@ -575,7 +605,8 @@ fn node_local_service_name(cluster: &NervixCluster, ordinal: i32) -> String {
     format!("{}-local-node-{}", cluster.name_any(), ordinal + 1)
 }
 
-fn pod_name(cluster: &NervixCluster, ordinal: i32) -> String {
+/// The name of the pod with `ordinal`; ordinal 0 is the bootstrap node, `node-1`.
+pub(crate) fn pod_name(cluster: &NervixCluster, ordinal: i32) -> String {
     format!("{}-{ordinal}", cluster.name_any())
 }
 
@@ -652,10 +683,62 @@ mod tests {
 
         assert!(script.contains("--allow-bootstrap"));
         assert!(script.contains("--cluster-bootstrap-host nervix-0.nervix-headless.${POD_NAMESPACE}.svc.cluster.local:47395"));
-        assert!(script.contains("--replica-count 3"));
         assert!(script.contains("--web-console-listen-addr 0.0.0.0:47420"));
         assert!(
             script.contains("--web-console-advertise-addr \"${HOST_IP}:$((31421 + ordinal))\"")
+        );
+    }
+
+    #[test]
+    fn startup_script_seeds_no_cluster_parameter() {
+        let mut cluster = cluster();
+        cluster.spec.initial_cluster_parameters.replica_count = Some(2);
+
+        let script = startup_script(&cluster);
+
+        assert!(!script.contains("--replica-count"));
+        assert!(!script.contains("REPLICA_COUNT"));
+    }
+
+    #[test]
+    fn pods_start_the_same_whatever_the_requested_parameters_and_the_scale() {
+        let mut requested = cluster();
+        requested.spec.initial_cluster_parameters.replica_count = Some(2);
+        let mut scaled = cluster();
+        scaled.spec.replicas = 5;
+
+        for mode in [
+            StatefulSetMode::Initializing,
+            StatefulSetMode::RemovingCredentials,
+            StatefulSetMode::Running,
+        ] {
+            let template = |cluster: &NervixCluster| {
+                stateful_set(cluster, mode)
+                    .spec
+                    .expect("stateful set spec exists")
+                    .template
+            };
+
+            assert_eq!(template(&requested), template(&cluster()));
+            assert_eq!(template(&scaled), template(&cluster()));
+        }
+    }
+
+    #[test]
+    fn the_initial_credential_command_passes_its_statement_as_an_argument() {
+        let command = initial_credential_cli_command("ALTER CLUSTER SET REPLICA_COUNT = 2;");
+
+        assert_eq!(
+            command,
+            vec![
+                "/bin/sh".to_string(),
+                "-ec".to_string(),
+                "NERVIX_PASSWORD=\"${NERVIX_INIT_DEFAULT_USER_PASSWORD}\" exec \
+                 /usr/local/bin/nervix-cli --server http://127.0.0.1:47391 --command \"$1\""
+                    .to_string(),
+                "nervix-cli".to_string(),
+                "ALTER CLUSTER SET REPLICA_COUNT = 2;".to_string(),
+            ]
         );
     }
 
@@ -837,6 +920,8 @@ mod tests {
             &cluster(),
             3,
             Some(NervixClusterInitializationPhase::Initialized),
+            None,
+            Vec::new(),
         );
 
         assert_eq!(
@@ -864,6 +949,7 @@ mod tests {
                     name: "nervix-initial-password".to_string(),
                     key: "password".to_string(),
                 }),
+                initial_cluster_parameters: Default::default(),
                 storage: "20Gi".to_string(),
                 log_filter: None,
                 local_access: Some(LocalAccessSpec {
