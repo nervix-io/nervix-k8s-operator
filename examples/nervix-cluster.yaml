@@ -21,6 +21,8 @@ spec:
   image: ghcr.io/nervix-io/nervix:debian-latest
   replicas: 3
   clusterId: nervix-kube
+  initialClusterParameters:
+    replicaCount: 2
   initialDefaultUserPasswordSecretRef:
     name: nervix-initial-password
     key: password
