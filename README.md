@@ -62,6 +62,8 @@ spec:
   image: ghcr.io/nervix-io/nervix:debian-latest
   replicas: 3
   clusterId: nervix-kube
+  initialClusterParameters:
+    replicaCount: 2
   initialDefaultUserPasswordSecretRef:
     name: nervix-initial-password
     key: password
@@ -110,7 +112,8 @@ spec:
 
 `replicaCount` is `REPLICA_COUNT`: how many nodes besides its owner hold a
 replica of each piece of runtime state. A parameter the request leaves out
-keeps the server's default.
+keeps the server's default. The shipped three-node example requests two
+replicas, so each piece of runtime state is replicated to both other nodes.
 
 The bootstrap node commits the server's defaults when it creates the cluster.
 Once pod 0 accepts the initial password, and before the operator removes it,
@@ -140,10 +143,9 @@ nervix-cli --server http://<node-address>:31390 \
   --command 'ALTER CLUSTER SET REPLICA_COUNT = 1;'
 ```
 
-Committing a request needs a Nervix server with `ALTER CLUSTER SET`. A server
-that refuses the statement leaves the cluster initializing, with the refusal in
-the condition. The operator runs `nervix-cli` in pod 0, so its ClusterRole lets
-it exec into pods.
+The operator runs `nervix-cli` in pod 0, so its ClusterRole lets it exec into
+pods. A refused parameter change leaves the cluster initializing, with the
+refusal in the condition.
 
 ## Node resources
 
