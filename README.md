@@ -171,9 +171,11 @@ When Kubernetes stops a pod, for a rolling update or a scale-down, it sends
 with `--shutdown-timeout 600s`, which bounds how long the node's work may take
 to move to the other nodes, and gives each pod a termination grace period of
 720 seconds: the shutdown timeout and two more minutes for the node to save its
-state and tear down. A node therefore always ends on its own before the kubelet
-kills it. A normal shutdown ends well before the timeout; a node that reaches it
-reports a cluster disruption in its log.
+state and tear down. So the kubelet's `SIGKILL` does not cut a working shutdown
+short. Nervix puts no limit of its own on the save, so a save that never ends,
+for example on a disk that stops answering, is still ended by that `SIGKILL`. A
+normal shutdown ends well before the timeout; a node that reaches it reports a
+cluster disruption in its log.
 [Shutdown And Recovery](https://docs.nervix.io/snapshot/shutdown.html) describes
 what a node does in that time.
 

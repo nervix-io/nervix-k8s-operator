@@ -49,8 +49,9 @@ const SHUTDOWN_TIMEOUT_SECONDS: i64 = 600;
 /// How much longer the kubelet waits than the shutdown timeout before it kills a pod: the time a
 /// node's shutdown takes beyond that timeout to save its state and tear down.
 const SHUTDOWN_TIMEOUT_ALLOWANCE_SECONDS: i64 = 120;
-/// The kubelet waits for the shutdown timeout and its allowance, so a node always ends on its own
-/// before it is killed.
+/// The kubelet waits for the shutdown timeout and its allowance, so its SIGKILL does not cut a
+/// working shutdown short. Nervix puts no limit of its own on the save, so a save that never ends
+/// is still ended by that SIGKILL.
 const TERMINATION_GRACE_PERIOD_SECONDS: i64 =
     SHUTDOWN_TIMEOUT_SECONDS + SHUTDOWN_TIMEOUT_ALLOWANCE_SECONDS;
 /// A container that exits on an error without writing a termination message reports the tail of its
