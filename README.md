@@ -164,6 +164,21 @@ memory limit or volume every pod exits, and the refusal names the check and the
 values involved. It is the end of the pod's log, and `kubectl describe pod`
 shows it as the container's last termination message.
 
+## Stopping a node
+
+When Kubernetes stops a pod, for a rolling update or a scale-down, it sends
+`SIGTERM`, and the node shuts down gracefully. The operator starts every node
+with `--shutdown-timeout 600s`, which bounds how long the node's work may take
+to move to the other nodes, and gives each pod a termination grace period of
+720 seconds: the shutdown timeout and two more minutes for the node to save its
+state and tear down. So the kubelet's `SIGKILL` does not cut a working shutdown
+short. Nervix puts no limit of its own on the save, so a save that never ends,
+for example on a disk that stops answering, is still ended by that `SIGKILL`. A
+normal shutdown ends well before the timeout; a node that reaches it reports a
+cluster disruption in its log.
+[Shutdown And Recovery](https://docs.nervix.io/snapshot/shutdown.html) describes
+what a node does in that time.
+
 ## Interconnect certificates
 
 Nervix nodes authenticate their node-to-node traffic with mutual TLS. For each

@@ -41,10 +41,19 @@ const HTTP_PORT: i32 = 8080;
 const HTTPS_PORT: i32 = 8443;
 const OBSERVABILITY_PORT: i32 = 9090;
 const WEB_CONSOLE_PORT: i32 = 47420;
-/// SIGTERM starts a node's graceful shutdown, which its 50-second default shutdown timeout bounds,
-/// including the 30-second default drain timeout. The kubelet waits longer, so a node that cannot
-/// finish shutting down exits on its own before it is killed.
-const TERMINATION_GRACE_PERIOD_SECONDS: i64 = 60;
+/// The shutdown timeout every node is started with, as `--shutdown-timeout`. SIGTERM starts a
+/// node's graceful shutdown, and this bounds how long its work may take to move to the other
+/// nodes. It is large on purpose: a normal shutdown ends well before it, and a node that reaches it
+/// reports a cluster disruption.
+const SHUTDOWN_TIMEOUT_SECONDS: i64 = 600;
+/// How much longer the kubelet waits than the shutdown timeout before it kills a pod: the time a
+/// node's shutdown takes beyond that timeout to save its state and tear down.
+const SHUTDOWN_TIMEOUT_ALLOWANCE_SECONDS: i64 = 120;
+/// The kubelet waits for the shutdown timeout and its allowance, so its SIGKILL does not cut a
+/// working shutdown short. Nervix puts no limit of its own on the save, so a save that never ends
+/// is still ended by that SIGKILL.
+const TERMINATION_GRACE_PERIOD_SECONDS: i64 =
+    SHUTDOWN_TIMEOUT_SECONDS + SHUTDOWN_TIMEOUT_ALLOWANCE_SECONDS;
 /// A container that exits on an error without writing a termination message reports the tail of its
 /// log instead, so a node's startup refusal appears in its pod's status.
 const TERMINATION_MESSAGE_POLICY: &str = "FallbackToLogsOnError";
@@ -432,6 +441,7 @@ exec /usr/local/bin/nervix-server \
   --interconnect-tls-cert "{tls_directory}/${{node_id}}{certificate_suffix}" \
   --interconnect-tls-key "{tls_directory}/${{node_id}}{private_key_suffix}" \
   --db-path /var/lib/nervix/db \
+  --shutdown-timeout {SHUTDOWN_TIMEOUT_SECONDS}s \
   ${{bootstrap_args}}
 "#
     )
@@ -793,7 +803,7 @@ mod tests {
     }
 
     #[test]
-    fn pods_outlast_the_default_shutdown_timeout_before_they_are_killed() {
+    fn pods_outlast_their_shutdown_timeout_before_they_are_killed() {
         let stateful_set = stateful_set(&cluster(), StatefulSetMode::Running);
         let pod = stateful_set
             .spec
@@ -801,8 +811,10 @@ mod tests {
             .template
             .spec
             .expect("pod spec exists");
+        let script = startup_script(&cluster());
 
-        assert_eq!(pod.termination_grace_period_seconds, Some(60));
+        assert!(script.contains("--shutdown-timeout 600s"));
+        assert_eq!(pod.termination_grace_period_seconds, Some(720));
     }
 
     #[test]
